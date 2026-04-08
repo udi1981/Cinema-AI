@@ -51,6 +51,12 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scriptRef = useRef<MovieScript | null>(null);
+
+  // Keep ref in sync with state so async functions always see latest script
+  useEffect(() => {
+    scriptRef.current = script;
+  }, [script]);
 
   // Sync audio with video
   useEffect(() => {
@@ -159,50 +165,75 @@ export default function App() {
         }
       }));
 
-      const systemInstruction = `You are a world-class film director and scriptwriter. 
-      Your task is to break down a book excerpt or a full script into a detailed scene-by-scene storyboard.
-      Each scene should be roughly 7-8 seconds long visually.
-      
-      CRITICAL: Follow the user's text STRICTLY. Do not omit key details, dialogue, or atmosphere.
-      ${beCreative ? 'BE CREATIVE: Add more cinematic depth, unexpected twists, and detailed visual descriptions that enhance the story while staying true to the core narrative.' : 'STRICT ADHERENCE: Follow the source text as closely as possible without adding extra creative elements.'}
-      
-      DIALOGUE & NARRATION: You MUST extract and include all dialogue for characters (e.g., Gulliver, Lilliputians) and any narration from the source text. 
-      This text MUST be placed in the "audioScript" field for each scene. If a scene has no dialogue, provide a cinematic narration based on the book's text.
-      
-      VISUAL CONSISTENCY: I am providing you with reference images of characters or atmosphere. 
-      In your "visualPrompt" for each scene, describe the characters and environment based on these images 
-      to ensure the AI video generator maintains perfect consistency.
-      
-      For each scene, provide:
-      1. A scene title.
-      2. A detailed narrative description.
-      3. A highly specific visual prompt for an AI video generator (Veo). 
-         Include lighting, camera angles, textures, and specific movements.
-      4. "audioScript": The exact text to be spoken in this scene (dialogue and/or narration).
-      
-      Return the result as a JSON object matching the MovieScript interface:
-      {
-        "title": "Movie Title",
-        "genre": "Genre",
-        "style": "${style}",
-        "scenes": [
-          {
-            "id": "unique-id",
-            "title": "Scene Title",
-            "description": "Narrative description",
-            "visualPrompt": "Detailed visual prompt for AI",
-            "audioScript": "The exact dialogue or narration text from the book",
-            "durationSeconds": 8
-          }
-        ]
-      }`;
+      const systemInstruction = `You are an elite-level film director, cinematographer, and screenwriter working at the highest level of cinematic production (Spielberg, Villeneuve, Nolan caliber).
+
+YOUR MISSION: Break down the user's text into an ULTRA-DETAILED scene-by-scene production bible. Each scene = one 7-8 second AI-generated video clip. The output must be so detailed that an AI video generator (Google Veo) can produce a perfect shot with ZERO ambiguity.
+
+=== LANGUAGE RULES ===
+- "title": Hebrew (עברית)
+- "description": Hebrew — full cinematic narrative description with emotional beats
+- "audioScript": Hebrew — ALL dialogue and narration MUST be in Hebrew. This is the SPOKEN TEXT that will be synthesized to audio via TTS. Write natural, expressive, cinematic Hebrew. Include speaker tags in parentheses when multiple characters speak, e.g. (גוליבר:) or (מספר:)
+- "visualPrompt": ENGLISH ONLY — this goes directly to the Veo AI video model. Must be hyper-detailed in English.
+
+=== CRITICAL SOURCE FIDELITY ===
+Follow the user's source text with EXTREME precision. Do NOT skip scenes, compress dialogue, or summarize. Every meaningful sentence, event, and piece of dialogue in the source must appear in the output. If the source has 20 events, produce 20+ scenes — never compress into fewer.
+${beCreative ? 'CREATIVE MODE ON: Enhance with cinematic depth — add atmospheric details, emotional subtext, dramatic camera movements, and rich visual texture. But NEVER skip or compress source content. Only ADD, never remove.' : 'STRICT MODE: Follow source text literally. No embellishments. Describe exactly what the text says.'}
+
+=== VISUAL PROMPT SPECIFICATION (ENGLISH — for Veo AI) ===
+Each "visualPrompt" must be a COMPLETE shot description containing ALL of the following:
+
+**CAMERA:** Exact shot type (extreme close-up, medium shot, wide establishing shot, bird's-eye, Dutch angle, over-the-shoulder, POV, tracking shot, dolly zoom, crane shot, steadicam follow). Specify camera MOVEMENT (slow push-in, lateral tracking left-to-right, ascending crane, handheld shake, static locked-off, slow orbit around subject).
+
+**LIGHTING:** Exact lighting setup (golden hour warm backlight, harsh overhead fluorescent, single-source candlelight with deep shadows, volumetric god-rays through fog, cool blue moonlight rim-lighting, three-point studio setup). Specify direction, color temperature (2700K warm, 5600K daylight, 8000K cold blue), and contrast ratio.
+
+**SUBJECT:** Precise physical description of EVERY character in frame — age, build, skin tone, hair (color/style/length), clothing (exact garments, colors, textures, condition — torn/pristine/weathered), facial expression (micro-expressions: furrowed brow, slight smirk, wide terrified eyes, clenched jaw), body posture and gesture. If reference images were provided, describe characters EXACTLY as they appear in those references.
+
+**ACTION:** Frame-by-frame description of movement within the 8-second clip. What happens at second 0? Second 3? Second 7? Describe the MOTION: "Character slowly raises trembling hand to face, fingers spread, tears rolling down left cheek" — not just "character is sad."
+
+**ENVIRONMENT:** Full production design — location (interior/exterior), architecture style, materials (rough stone, polished marble, rusted metal), weather (overcast with light drizzle, clear starry night, thick rolling fog), time of day, season. Background elements: crowd density, vehicles, vegetation type, props on surfaces.
+
+**COLOR & MOOD:** Dominant color palette (desaturated teal and orange, high-contrast black and red, pastel watercolor wash). Film stock emulation (Kodak Vision3 500T, ARRI Alexa look, 16mm grain). Mood keywords (haunting, euphoric, claustrophobic, dreamlike, visceral).
+
+**STYLE:** "${style}" style. Specify exactly how this style manifests: ${style === 'Pixar' ? 'Smooth subsurface scattering on skin, large expressive eyes, rounded soft geometry, saturated candy-like colors, subtle ambient occlusion, Pixar-quality cloth simulation' : style === 'Realistic' ? 'Photorealistic rendering, natural skin pores and imperfections, accurate cloth physics, cinematic depth of field f/1.4, lens flare on highlights, film grain' : style === 'Paper Folding' ? 'Everything built from folded paper/origami, visible paper texture and creases, stop-motion-like movement at 12fps, paper shadows, miniature diorama scale, warm craft lighting' : style === 'Cyberpunk' ? 'Neon-drenched environments, holographic UI overlays, rain-slicked streets reflecting neon, chrome and carbon fiber materials, LED tattoos, volumetric fog with colored light rays' : 'Hand-drawn pencil/ink linework visible, watercolor wash backgrounds, slight paper texture overlay, 2D parallax depth, Studio Ghibli-inspired movement fluidity'}
+
+**CONTINUITY:** If this scene follows a previous scene, describe how the visual connects — same character position, matching eye-line, continuous camera movement, matching lighting direction.
+
+=== AUDIO SCRIPT (HEBREW) ===
+The "audioScript" is the EXACT Hebrew text that will be spoken aloud via TTS. Rules:
+- Write COMPLETE dialogue — every word the character says, in natural spoken Hebrew
+- For narration, write cinematic Hebrew narration (כמספר סיפורים מקצועי)
+- Mark speakers: (מספר:) for narrator, (שם-דמות:) for characters
+- Include emotional direction in brackets: [בלחש, בפחד] [צועק בכעס] [בשקט, בהתרגשות עמוקה]
+- NEVER summarize dialogue. If a character gives a speech, write the FULL speech in Hebrew.
+- Match the audioScript timing to the 8-second video duration
+
+=== SCENE GRANULARITY ===
+Break the source into the MAXIMUM number of scenes possible. Each distinct action, camera angle change, or dialogue beat = a new scene. Prefer MORE scenes with focused content over FEWER scenes with compressed content. A single paragraph of source text should produce 2-5 scenes minimum.
+
+=== OUTPUT FORMAT ===
+Return a JSON object:
+{
+  "title": "כותרת הסרט בעברית",
+  "genre": "ז'אנר",
+  "style": "${style}",
+  "scenes": [
+    {
+      "id": "scene-001",
+      "title": "כותרת הסצנה בעברית",
+      "description": "תיאור נרטיבי מפורט בעברית — מה קורה, מה הדמויות מרגישות, מה המשמעות הדרמטית",
+      "visualPrompt": "ENGLISH: Ultra-detailed shot description with camera, lighting, subject, action, environment, color, style, continuity — minimum 80 words per scene",
+      "audioScript": "(מספר:) [בקול עמוק ודרמטי] הטקסט המלא בעברית שיוקרא בקול... (דמות:) [ברגש] הדיאלוג המלא...",
+      "durationSeconds": 8
+    }
+  ]
+}`;
 
       const response = await withRetry(() => ai.models.generateContent({
         model: SCRIPT_MODEL,
         contents: {
           parts: [
             ...imageParts,
-            { text: `Break down this script/book text into scenes: ${prompt}` }
+            { text: `Break down this text into the MAXIMUM number of ultra-detailed cinematic scenes possible. Every sentence, every event, every piece of dialogue must become its own scene. Do not skip or compress anything. Hebrew dialogue and narration, English visual prompts. Source text:\n\n${prompt}` }
           ]
         },
         config: {
@@ -263,31 +294,41 @@ export default function App() {
     throw lastError;
   };
 
-  const generateVideoForScene = async (index: number) => {
-    if (!script || !isApiKeySelected || isProcessingVideo) return;
-    
+  const generateVideoForScene = async (index: number, _batchMode = false) => {
+    // Always read from ref for latest state (critical for batch "Produce All" chaining)
+    const latestScript = scriptRef.current;
+    // In batch mode, skip the isProcessingVideo guard (we manage it ourselves)
+    if (!latestScript || !isApiKeySelected || (!_batchMode && isProcessingVideo)) return;
+
     // Use more aggressive retry for video generation
     const videoWithRetry = (fn: any) => withRetry(fn, 7, 8000);
-    
-    const scene = script.scenes[index];
-    const updatedScenes = [...script.scenes];
+
+    const scene = latestScript.scenes[index];
+    const updatedScenes = [...latestScript.scenes];
     updatedScenes[index].status = 'generating';
-    setScript({ ...script, scenes: updatedScenes });
+    setScript({ ...latestScript, scenes: updatedScenes });
     setIsProcessingVideo(true);
 
     try {
       // Use API_KEY for Veo as it requires a paid key, fallback to GEMINI_API_KEY
       const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
       const ai = new GoogleGenAI({ apiKey });
-      const prevScene = index > 0 ? script.scenes[index - 1] : null;
+      // Read previous scene from ref to get the latest videoObject (critical for chaining)
+      const prevScene = index > 0 ? scriptRef.current?.scenes[index - 1] ?? null : null;
       
       // 1. Generate TTS for the scene
       let audioUrl = '';
       try {
         const ttsText = scene.audioScript || scene.description;
+        // Strip speaker tags and emotional directions for clean TTS, but keep the emotional context in the prompt
+        const cleanTtsText = ttsText
+          .replace(/\([^)]*:\)/g, '') // Remove (מספר:) (דמות:) tags
+          .replace(/\[[^\]]*\]/g, '')  // Remove [בלחש] emotional directions
+          .trim();
+        const emotionalContext = (ttsText.match(/\[[^\]]*\]/g) || []).join(' ');
         const ttsResponse = await withRetry(() => ai.models.generateContent({
           model: "gemini-2.5-flash-preview-tts",
-          contents: [{ parts: [{ text: `Say with cinematic emotion: ${ttsText}` }] }],
+          contents: [{ parts: [{ text: `Speak this Hebrew text with deep cinematic emotion${emotionalContext ? ` (${emotionalContext})` : ''}. Speak clearly and expressively in Hebrew:\n${cleanTtsText}` }] }],
           config: {
             responseModalities: [Modality.AUDIO],
             speechConfig: {
@@ -372,7 +413,9 @@ export default function App() {
       const blob = await videoResponse.blob();
       const url = URL.createObjectURL(blob);
 
-      const finalScenes = [...script.scenes];
+      // Use ref for latest state to avoid stale closure
+      const currentScript = scriptRef.current!;
+      const finalScenes = [...currentScript.scenes];
       finalScenes[index] = {
         ...finalScenes[index],
         status: 'completed',
@@ -380,13 +423,14 @@ export default function App() {
         videoObject: videoData,
         audioUrl: audioUrl
       };
-      setScript({ ...script, scenes: finalScenes });
+      setScript({ ...currentScript, scenes: finalScenes });
       setCurrentSceneIndex(index);
     } catch (err: any) {
       console.error("Video generation failed:", err);
-      const finalScenes = [...script.scenes];
+      const currentScript = scriptRef.current!;
+      const finalScenes = [...currentScript.scenes];
       finalScenes[index].status = 'failed';
-      setScript({ ...script, scenes: finalScenes });
+      setScript({ ...currentScript, scenes: finalScenes });
       
       let errorMessage = "";
       if (err instanceof Error) {
@@ -420,15 +464,19 @@ export default function App() {
   };
 
   const generateAllScenes = async () => {
-    if (!script || !isApiKeySelected || isGeneratingAll || isProcessingVideo) return;
-    
+    const latestScript = scriptRef.current;
+    if (!latestScript || !isApiKeySelected || isGeneratingAll || isProcessingVideo) return;
+
     setIsGeneratingAll(true);
     setError(null);
 
     try {
-      for (let i = 0; i < script.scenes.length; i++) {
-        if (script.scenes[i].status === 'completed') continue;
-        await generateVideoForScene(i);
+      for (let i = 0; i < latestScript.scenes.length; i++) {
+        // Always read latest state from ref (previous scene may have updated videoObject)
+        const current = scriptRef.current;
+        if (!current) break;
+        if (current.scenes[i].status === 'completed') continue;
+        await generateVideoForScene(i, true);
       }
     } catch (err) {
       console.error("Batch generation failed:", err);
