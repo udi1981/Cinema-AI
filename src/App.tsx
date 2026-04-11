@@ -517,7 +517,7 @@ export default function App() {
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 className={cn(
-                  "px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all",
+                  "px-2.5 py-1.5 rounded-full text-[9px] font-bold uppercase tracking-wide transition-all",
                   activeTab === tab ? "bg-white text-black shadow-lg" : "text-white/40"
                 )}
               >
@@ -554,9 +554,9 @@ export default function App() {
             className="bg-red-500/10 border-b border-red-500/20 overflow-hidden"
           >
             <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3 text-red-400">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <p className="text-xs font-medium leading-relaxed">{error}</p>
+              <div className="flex items-start gap-3 text-red-400 min-w-0">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <p className="text-xs font-medium leading-relaxed break-words">{error}</p>
               </div>
               <button 
                 onClick={() => setError(null)}
@@ -633,10 +633,10 @@ export default function App() {
                       <Plus className="w-5 h-5" />
                     </button>
                   ) : (
-                    <button 
+                    <button
                       onClick={generateScript}
                       disabled={isGeneratingScript || !prompt.trim()}
-                      className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-xs font-bold flex items-center gap-2 shadow-xl shadow-blue-600/20 transition-all active:scale-95"
+                      className="px-5 py-3 sm:py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-xs font-bold flex items-center gap-2 shadow-xl shadow-blue-600/20 transition-all active:scale-95"
                     >
                       {isGeneratingScript ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
                       {script ? 'Refine' : 'Generate'}
@@ -657,9 +657,9 @@ export default function App() {
                     key={s.name}
                     onClick={() => setStyle(s.name)}
                     className={cn(
-                      "flex items-center gap-4 p-3 rounded-2xl border transition-all text-left group",
-                      style === s.name 
-                        ? "bg-white/10 border-white/20 ring-1 ring-white/20" 
+                      "flex items-center gap-4 p-4 md:p-3 rounded-2xl border transition-all text-left group",
+                      style === s.name
+                        ? "bg-white/10 border-white/20 ring-1 ring-white/20"
                         : "bg-white/[0.02] border-white/5 hover:bg-white/5"
                     )}
                   >
@@ -690,17 +690,26 @@ export default function App() {
               </div>
               <div className="grid grid-cols-3 gap-3">
                 {referenceImages.map((img) => (
-                  <motion.div 
+                  <motion.div
                     layout
-                    key={img.id} 
+                    key={img.id}
                     className="aspect-square bg-white/5 rounded-2xl border border-white/10 relative group overflow-hidden shadow-inner"
                   >
                     <img src={img.previewUrl} className="w-full h-full object-cover" alt="Reference" />
-                    <button 
+                    {/* Desktop: full-card hover overlay */}
+                    <button
                       onClick={() => removeReferenceImage(img.id)}
-                      className="absolute inset-0 bg-red-600/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm"
+                      className="absolute inset-0 bg-red-600/80 items-center justify-center opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm hidden md:flex"
                     >
                       <Trash2 className="w-5 h-5" />
+                    </button>
+                    {/* Mobile: always-visible corner X button */}
+                    <button
+                      onClick={() => removeReferenceImage(img.id)}
+                      className="absolute top-1.5 right-1.5 w-7 h-7 bg-black/70 hover:bg-red-600 rounded-full flex items-center justify-center backdrop-blur-sm border border-white/20 md:hidden"
+                      aria-label="Remove reference image"
+                    >
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   </motion.div>
                 ))}
@@ -729,7 +738,7 @@ export default function App() {
               "space-y-4",
               activeTab !== 'preview' && "hidden md:block"
             )}>
-              <div className="aspect-video bg-black rounded-[2rem] overflow-hidden border border-white/10 relative group shadow-2xl ring-1 ring-white/5">
+              <div className="aspect-video max-h-[55vh] md:max-h-none bg-black rounded-[2rem] overflow-hidden border border-white/10 relative group shadow-2xl ring-1 ring-white/5">
                 {currentSceneIndex !== null && script?.scenes[currentSceneIndex]?.videoUrl ? (
                   <>
                     <video 
@@ -815,7 +824,7 @@ export default function App() {
                     <button
                       onClick={generateAllScenes}
                       disabled={isGeneratingAll || isProcessingVideo || !isApiKeySelected}
-                      className="flex-1 sm:flex-none px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-2xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
+                      className="flex-1 sm:flex-none px-6 py-3 sm:py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-2xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
                     >
                       {isGeneratingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
                       {isGeneratingAll ? 'Processing...' : 'Produce All'}
@@ -823,7 +832,7 @@ export default function App() {
                   )}
                   <button
                     onClick={addManualScene}
-                    className="p-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl transition-all"
+                    className="p-3 sm:p-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl transition-all shrink-0"
                     title="Add Scene"
                   >
                     <Plus className="w-5 h-5" />
@@ -831,7 +840,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar pb-20 md:pb-0">
+              <div className="space-y-4 max-h-[70vh] md:max-h-[600px] overflow-y-auto pr-2 custom-scrollbar pb-28 md:pb-0">
                 <AnimatePresence mode="popLayout">
                   {script?.scenes.map((scene, index) => (
                     <motion.div
@@ -840,17 +849,17 @@ export default function App() {
                       initial={{ opacity: 0, scale: 0.95 }}
                       animate={{ opacity: 1, scale: 1 }}
                       className={cn(
-                        "p-5 rounded-[2rem] border transition-all group relative overflow-hidden",
-                        currentSceneIndex === index 
-                          ? "bg-white/[0.08] border-white/20 ring-1 ring-white/20 shadow-2xl" 
+                        "p-4 sm:p-5 rounded-[2rem] border transition-all group relative overflow-hidden",
+                        currentSceneIndex === index
+                          ? "bg-white/[0.08] border-white/20 ring-1 ring-white/20 shadow-2xl"
                           : "bg-white/[0.03] border-white/5 hover:bg-white/[0.05]"
                       )}
                     >
                       {editingSceneId === scene.id ? (
-                        <div className="space-y-4">
-                          <div className="flex items-center justify-between">
+                        <div className="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar -mr-2 pr-2">
+                          <div className="flex items-center justify-between sticky top-0 bg-white/[0.08] backdrop-blur-sm -mx-1 px-1 py-1 z-10">
                             <h3 className="font-black text-[10px] text-blue-500 uppercase tracking-[0.2em]">Edit Scene {index + 1}</h3>
-                            <button onClick={() => setEditingSceneId(null)} className="p-1.5 hover:bg-white/10 rounded-xl">
+                            <button onClick={() => setEditingSceneId(null)} className="p-2 hover:bg-white/10 rounded-xl">
                               <X className="w-4 h-4" />
                             </button>
                           </div>
@@ -888,11 +897,11 @@ export default function App() {
                           </button>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-5">
+                        <div className="flex items-center gap-3 sm:gap-5">
                           {/* Scene Number & Status */}
                           <div className="flex flex-col items-center gap-2 shrink-0">
                             <div className={cn(
-                              "w-12 h-12 rounded-2xl flex items-center justify-center font-black text-lg shadow-inner",
+                              "w-11 h-11 sm:w-12 sm:h-12 rounded-2xl flex items-center justify-center font-black text-lg shadow-inner",
                               scene.status === 'completed' ? "bg-emerald-500/20 text-emerald-500" : "bg-white/5 text-white/20"
                             )}>
                               {index + 1}
@@ -902,14 +911,14 @@ export default function App() {
 
                           {/* Content */}
                           <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-3 mb-1">
-                              <h3 className="font-bold text-base truncate">{scene.title}</h3>
-                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button onClick={() => setEditingSceneId(scene.id)} className="p-1.5 hover:bg-white/10 rounded-lg text-white/30 hover:text-white"><Settings className="w-3.5 h-3.5" /></button>
-                                <button onClick={() => deleteScene(scene.id)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/30 hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                            <div className="flex items-center gap-2 mb-1">
+                              <h3 className="font-bold text-base truncate flex-1 min-w-0">{scene.title}</h3>
+                              <div className="flex items-center gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity shrink-0">
+                                <button onClick={() => setEditingSceneId(scene.id)} className="p-2 hover:bg-white/10 rounded-lg text-white/40 hover:text-white" aria-label="Edit scene"><Settings className="w-4 h-4 md:w-3.5 md:h-3.5" /></button>
+                                <button onClick={() => deleteScene(scene.id)} className="p-2 hover:bg-red-500/10 rounded-lg text-white/40 hover:text-red-500" aria-label="Delete scene"><Trash2 className="w-4 h-4 md:w-3.5 md:h-3.5" /></button>
                               </div>
                             </div>
-                            <p className="text-xs text-white/40 line-clamp-1 group-hover:line-clamp-none transition-all">{scene.description}</p>
+                            <p className="text-xs text-white/40 line-clamp-2 md:line-clamp-1 md:group-hover:line-clamp-none transition-all">{scene.description}</p>
                             {scene.audioScript && (
                               <div className="flex items-center gap-1.5 mt-1.5 text-[9px] text-blue-400/60 font-bold uppercase tracking-wider">
                                 <Wand2 className="w-2.5 h-2.5" />
@@ -921,21 +930,22 @@ export default function App() {
                           {/* Action */}
                           <div className="shrink-0">
                             {scene.status === 'completed' ? (
-                              <button 
+                              <button
                                 onClick={() => { setCurrentSceneIndex(index); setActiveTab('preview'); }}
-                                className="w-10 h-10 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all"
+                                className="w-11 h-11 md:w-10 md:h-10 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all"
+                                aria-label="Play scene"
                               >
                                 <Play className="w-4 h-4 fill-current" />
                               </button>
                             ) : scene.status === 'generating' ? (
-                              <div className="w-10 h-10 flex items-center justify-center">
+                              <div className="w-11 h-11 md:w-10 md:h-10 flex items-center justify-center">
                                 <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
                               </div>
                             ) : (
-                              <button 
+                              <button
                                 onClick={() => generateVideoForScene(index)}
                                 disabled={isProcessingVideo || !isApiKeySelected}
-                                className="px-4 py-2 bg-white text-black hover:bg-white/90 disabled:opacity-30 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all"
+                                className="px-5 py-3 md:px-4 md:py-2 bg-white text-black hover:bg-white/90 disabled:opacity-30 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all"
                               >
                                 Produce
                               </button>
@@ -960,7 +970,10 @@ export default function App() {
       </main>
 
       {/* Mobile Navigation Bar */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[90%] max-w-md bg-black/60 backdrop-blur-2xl border border-white/10 rounded-full p-2 flex items-center justify-between md:hidden z-[60] shadow-2xl ring-1 ring-white/5">
+      <div
+        className="fixed left-1/2 -translate-x-1/2 w-[90%] max-w-md bg-black/60 backdrop-blur-2xl border border-white/10 rounded-full p-2 flex items-center justify-between md:hidden z-[60] shadow-2xl ring-1 ring-white/5"
+        style={{ bottom: 'max(1.5rem, env(safe-area-inset-bottom))' }}
+      >
         {(['script', 'timeline', 'preview'] as const).map((tab) => (
           <button
             key={tab}
