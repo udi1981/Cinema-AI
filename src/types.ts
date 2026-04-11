@@ -44,15 +44,19 @@ export type ExportStatus = 'idle' | 'loading-ffmpeg' | 'processing' | 'done' | '
 
 export type MovieLength = 'short' | 'medium' | 'long';
 
-// Google AI Studio pricing (approximate USD)
+// Google AI Studio / Vertex AI pricing (approximate USD)
+// Veo 3: ~$0.35/second of video → 8s clip = ~$2.80
+// TTS (Gemini Flash): ~$0.01/scene
+// Translation (Gemini Flash): ~$0.005/scene
+// Script gen (Gemini Pro, amortized): ~$0.01/scene
 export const COST_PER_SCENE = {
-  veo: 0.10,        // Veo 3.1 video generation ~$0.10/scene (8s clip, free tier estimate)
-  tts: 0.002,       // Gemini Flash TTS ~$0.002/scene
-  translation: 0.001, // Gemini Flash translation ~$0.001/scene
-  script: 0.005,     // Gemini Pro script gen (amortized per scene)
+  veo: 2.80,         // Veo 3.1 video generation ~$0.35/sec × 8s
+  tts: 0.01,         // Gemini Flash TTS
+  translation: 0.005, // Gemini Flash translation
+  script: 0.01,       // Gemini Pro script gen (amortized per scene)
 } as const;
 
-export const SCENE_COST = COST_PER_SCENE.veo + COST_PER_SCENE.tts + COST_PER_SCENE.translation + COST_PER_SCENE.script; // ~$0.108 per scene
+export const SCENE_COST = COST_PER_SCENE.veo + COST_PER_SCENE.tts + COST_PER_SCENE.translation + COST_PER_SCENE.script; // ~$2.83 per scene
 
 // Calculate scene estimates based on word count
 // Hebrew: ~3 words per second of narration, 8s per scene = ~24 words per scene of narration
