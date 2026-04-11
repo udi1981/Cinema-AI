@@ -1,34 +1,42 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  Film, 
-  Sparkles, 
-  Play, 
-  Plus, 
-  ChevronRight, 
-  Loader2, 
-  CheckCircle2, 
+import {
+  Film,
+  Sparkles,
+  Play,
+  Plus,
+  Loader2,
+  CheckCircle2,
   AlertCircle,
   Settings,
   Download,
-  Share2,
   Trash2,
   Clapperboard,
   Palette,
   Clock,
   Wand2,
-  Image as ImageIcon,
   X,
-  Upload
+  Upload,
+  Globe,
+  Check,
+  ArrowRight,
+  ArrowLeft,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import Markdown from 'react-markdown';
-import { GoogleGenAI, GenerateContentResponse, Modality, VideoGenerationReferenceType } from "@google/genai";
+import { GoogleGenAI, Modality, VideoGenerationReferenceType } from "@google/genai";
+import { FFmpeg } from '@ffmpeg/ffmpeg';
+import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { cn } from './lib/utils';
-import { MovieScript, Scene, MovieStyle, ReferenceImage } from './types';
+import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardStep, ExportStatus } from './types';
 
 // Constants
 const VEO_MODEL = 'veo-3.1-generate-preview';
 const SCRIPT_MODEL = 'gemini-3.1-pro-preview';
+
+const LANGUAGE_CONFIG: Record<AudioLanguage, { label: string; flag: string; voice: string; ttsLang: string }> = {
+  he: { label: 'עברית', flag: '🇮🇱', voice: 'Enceladus', ttsLang: 'Hebrew' },
+  en: { label: 'English', flag: '🇺🇸', voice: 'Kore', ttsLang: 'English' },
+  zh: { label: '中文', flag: '🇨🇳', voice: 'Enceladus', ttsLang: 'Chinese Mandarin' },
+};
 
 export default function App() {
   // State
@@ -41,11 +49,21 @@ export default function App() {
   const [isApiKeySelected, setIsApiKeySelected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isProcessingVideo, setIsProcessingVideo] = useState(false);
-  const [activeTab, setActiveTab] = useState<'script' | 'timeline' | 'preview'>('script');
+  const [wizardStep, setWizardStep] = useState<WizardStep>('story');
+  const [selectedLanguages, setSelectedLanguages] = useState<AudioLanguage[]>(['he']);
   const [isGeneratingAll, setIsGeneratingAll] = useState(false);
   const [isManualMode, setIsManualMode] = useState(false);
   const [editingSceneId, setEditingSceneId] = useState<string | null>(null);
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
+  const [audioLanguage, setAudioLanguage] = useState<AudioLanguage>('he');
+  const [characterImageDescription, setCharacterImageDescription] = useState('');
+  // Export state
+  const [exportStatus, setExportStatus] = useState<ExportStatus>('idle');
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportProgressMsg, setExportProgressMsg] = useState('');
+  const [exportUrl, setExportUrl] = useState<string | null>(null);
+  const [exportLanguage, setExportLanguage] = useState<AudioLanguage>('he');
+  const [showExportDialog, setShowExportDialog] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -98,6 +116,9 @@ export default function App() {
       if (window.aistudio?.hasSelectedApiKey) {
         const hasKey = await window.aistudio.hasSelectedApiKey();
         setIsApiKeySelected(hasKey);
+      } else if (process.env.API_KEY || process.env.GEMINI_API_KEY) {
+        // Running locally with env keys — auto-enable
+        setIsApiKeySelected(true);
       }
     };
     checkKey();
@@ -141,12 +162,58 @@ export default function App() {
   const removeReferenceImage = (id: string) => {
     setReferenceImages(prev => {
       const filtered = prev.filter(img => img.id !== id);
-      // Revoke URL for the removed image
       const removed = prev.find(img => img.id === id);
       if (removed) URL.revokeObjectURL(removed.previewUrl);
       return filtered;
     });
   };
+
+  // Analyze reference images to generate hyper-detailed character description for consistency
+  const analyzeReferenceImages = async (images: ReferenceImage[]) => {
+    if (images.length === 0) {
+      setCharacterImageDescription('');
+      return;
+    }
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const imageParts = images.map(img => ({
+        inlineData: { data: img.data, mimeType: img.mimeType }
+      }));
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ parts: [
+          ...imageParts,
+          { text: `You are a character consistency specialist for AI video generation. Analyze this character reference image(s) and produce an EXHAUSTIVE physical description in English that will be injected into EVERY video generation prompt to ensure the character looks IDENTICAL across 20+ scenes.
+
+Include ALL of the following with extreme precision:
+- FACE: exact face shape, skin tone (be specific e.g. "warm olive with golden undertones"), forehead size, cheekbone prominence, jaw shape
+- EYES: exact color, shape (round/almond/hooded), size, eyelash length, eyebrow shape+thickness+color
+- NOSE: shape, size, bridge width
+- MOUTH: lip shape, lip color, teeth visibility
+- HAIR: exact color (e.g. "dark chestnut brown with subtle auburn highlights"), style, length, texture (straight/wavy/curly), parting side, bangs
+- BODY: approximate age, height estimate, build (slim/athletic/average/heavy), posture
+- CLOTHING: describe EVERY garment with exact colors, patterns, textures, fit. Include accessories, shoes, hats, glasses
+- DISTINGUISHING FEATURES: scars, freckles, moles, dimples, tattoos, piercings
+
+Output ONLY the description, no preamble. Be ruthlessly specific — vague descriptions cause character drift in AI video.` }
+        ]}]
+      });
+      const desc = response.text?.trim() || '';
+      setCharacterImageDescription(desc);
+      console.log('Character analysis:', desc.substring(0, 150) + '...');
+    } catch (err) {
+      console.error('Failed to analyze reference images:', err);
+    }
+  };
+
+  // Auto-analyze when reference images change
+  useEffect(() => {
+    if (referenceImages.length > 0) {
+      analyzeReferenceImages(referenceImages);
+    } else {
+      setCharacterImageDescription('');
+    }
+  }, [referenceImages.length]); // Only re-run when count changes
 
   const generateScript = async () => {
     if (!prompt.trim()) return;
@@ -196,7 +263,14 @@ Each "visualPrompt" must be a COMPLETE shot description containing ALL of the fo
 
 **STYLE:** "${style}" style. Specify exactly how this style manifests: ${style === 'Pixar' ? 'Smooth subsurface scattering on skin, large expressive eyes, rounded soft geometry, saturated candy-like colors, subtle ambient occlusion, Pixar-quality cloth simulation' : style === 'Realistic' ? 'Photorealistic rendering, natural skin pores and imperfections, accurate cloth physics, cinematic depth of field f/1.4, lens flare on highlights, film grain' : style === 'Paper Folding' ? 'Everything built from folded paper/origami, visible paper texture and creases, stop-motion-like movement at 12fps, paper shadows, miniature diorama scale, warm craft lighting' : style === 'Cyberpunk' ? 'Neon-drenched environments, holographic UI overlays, rain-slicked streets reflecting neon, chrome and carbon fiber materials, LED tattoos, volumetric fog with colored light rays' : 'Hand-drawn pencil/ink linework visible, watercolor wash backgrounds, slight paper texture overlay, 2D parallax depth, Studio Ghibli-inspired movement fluidity'}
 
-**CONTINUITY:** If this scene follows a previous scene, describe how the visual connects — same character position, matching eye-line, continuous camera movement, matching lighting direction.
+**CONTINUITY & SEAMLESS TRANSITIONS (CRITICAL — NO VISUAL JUMPS):**
+Every scene MUST flow seamlessly into the next, as if they are one continuous film. For each scene (except the first), describe:
+- EXACT TRANSITION TYPE: "This scene begins exactly where the previous scene ended" / "Continuous camera movement from previous shot" / "Match cut from close-up to wide shot"
+- MATCHING ELEMENTS: The last frame of the previous scene and the first frame of this scene must share: same lighting direction, same color temperature, same weather, same time of day (unless a time skip is narrated)
+- CHARACTER POSITION: If the character was on the left side of frame in the previous scene's final moment, they must START on the left side in this scene
+- CAMERA FLOW: Describe how the camera movement connects: "Camera continues its slow pan right from the previous scene" / "Cut to reverse angle of the same conversation"
+- ENVIRONMENT CONTINUITY: Same room = same furniture placement, same wall color, same props. Moving to new location = show the character walking/transitioning, never jump-cut to a new place without a visual bridge
+- AVOID: Jump cuts, sudden lighting changes, unexplained location changes, character teleportation, costume changes without reason
 
 === AUDIO SCRIPT (HEBREW) ===
 The "audioScript" is the EXACT Hebrew text that will be spoken aloud via TTS. Rules:
@@ -207,8 +281,31 @@ The "audioScript" is the EXACT Hebrew text that will be spoken aloud via TTS. Ru
 - NEVER summarize dialogue. If a character gives a speech, write the FULL speech in Hebrew.
 - Match the audioScript timing to the 8-second video duration
 
-=== SCENE GRANULARITY ===
-Break the source into the MAXIMUM number of scenes possible. Each distinct action, camera angle change, or dialogue beat = a new scene. Prefer MORE scenes with focused content over FEWER scenes with compressed content. A single paragraph of source text should produce 2-5 scenes minimum.
+=== CHARACTER CONSISTENCY (ABSOLUTE PRIORITY — ZERO TOLERANCE FOR DRIFT) ===
+You MUST output a "characterDescriptions" field — a single English paragraph describing EVERY character's FIXED appearance: exact age, height, build, skin tone, eye color, hair color/style/length, signature clothing, and distinguishing features. If reference images are provided, base descriptions EXACTLY on those images.
+${characterImageDescription ? `\n=== REFERENCE IMAGE CHARACTER ANALYSIS (USE THIS EXACTLY) ===\nThe following description was generated from the user's uploaded reference photos. This is the GROUND TRUTH for the character's appearance. Copy this description WORD FOR WORD into your "characterDescriptions" field and into EVERY "visualPrompt":\n${characterImageDescription}\n` : ''}
+EVERY "visualPrompt" MUST begin with the FULL character description, word-for-word. The character MUST look IDENTICAL in every single scene — same face, same hair, same clothing, same skin tone. ANY deviation is a critical failure. This ensures the AI video generator renders the SAME character in every scene.
+
+=== SCENE GRANULARITY (DYNAMIC — BASED ON STORY LENGTH) ===
+Each scene = one 8-second video clip. Calculate the NUMBER OF SCENES based on the source text length:
+- Short text (under 500 words): 8-15 scenes
+- Medium text (500-1500 words): 15-30 scenes
+- Long text (1500-3000 words): 30-50 scenes
+- Very long text (3000+ words): 50-80+ scenes
+
+CRITICAL RULE: The ENTIRE source text MUST be covered — from the very first sentence to the very last sentence. Do NOT stop partway through. Do NOT skip, compress, or summarize any part of the story. If the source has 40 paragraphs, you need enough scenes to cover ALL 40 paragraphs. Count the story events and make sure EACH ONE has a dedicated scene.
+
+Each scene = one meaningful story beat. Group related small actions into a single scene ONLY if they happen in the same location with the same emotional beat. But NEVER skip dialogue or key events — include everything. When in doubt, create MORE scenes rather than fewer.
+
+=== AUDIO DURATION MATCHING (CRITICAL) ===
+Video clips are 5-8 seconds long. The audioScript MUST fit within this time. Calculate: ~2.5 Hebrew words per second for natural speech.
+- 5 second scene = MAX 12 Hebrew words in audioScript
+- 6 second scene = MAX 15 Hebrew words
+- 7 second scene = MAX 17 Hebrew words
+- 8 second scene = MAX 20 Hebrew words
+If dialogue is LONGER than 20 words, SPLIT it across multiple scenes. Set "durationSeconds" to match the audioScript word count.
+NEVER put more text in audioScript than can be spoken in durationSeconds. The audio and video MUST end together — no cut-off mid-sentence.
+If a character has a long speech, break it into multiple scenes with natural pause points.
 
 === OUTPUT FORMAT ===
 Return a JSON object:
@@ -216,12 +313,13 @@ Return a JSON object:
   "title": "כותרת הסרט בעברית",
   "genre": "ז'אנר",
   "style": "${style}",
+  "characterDescriptions": "ENGLISH: Yuliver is a small alien boy, approximately 8 years old, with bright glowing teal eyes, soft lavender skin, short spiky silver hair... [FULL DESCRIPTION OF EVERY CHARACTER]",
   "scenes": [
     {
       "id": "scene-001",
       "title": "כותרת הסצנה בעברית",
       "description": "תיאור נרטיבי מפורט בעברית — מה קורה, מה הדמויות מרגישות, מה המשמעות הדרמטית",
-      "visualPrompt": "ENGLISH: Ultra-detailed shot description with camera, lighting, subject, action, environment, color, style, continuity — minimum 80 words per scene",
+      "visualPrompt": "[CHARACTER DESCRIPTIONS REPEATED HERE]. ENGLISH: Ultra-detailed shot description with camera, lighting, subject, action, environment, color, style, continuity — minimum 80 words per scene",
       "audioScript": "(מספר:) [בקול עמוק ודרמטי] הטקסט המלא בעברית שיוקרא בקול... (דמות:) [ברגש] הדיאלוג המלא...",
       "durationSeconds": 8
     }
@@ -233,7 +331,7 @@ Return a JSON object:
         contents: {
           parts: [
             ...imageParts,
-            { text: `Break down this text into the MAXIMUM number of ultra-detailed cinematic scenes possible. Every sentence, every event, every piece of dialogue must become its own scene. Do not skip or compress anything. Hebrew dialogue and narration, English visual prompts. Source text:\n\n${prompt}` }
+            { text: `Break down this ENTIRE text into detailed cinematic scenes — from the very first word to the very last word. Do NOT stop in the middle or skip any part. Each scene is an 8-second video clip. Create as many scenes as needed to cover the FULL story (for long texts this means 30-60+ scenes). Group related small actions into cohesive scenes, but NEVER skip dialogue, events, or story beats. Ensure SEAMLESS visual transitions between consecutive scenes — no jump cuts, no sudden changes. Hebrew dialogue and narration in audioScript, English visual prompts. Source text:\n\n${prompt}` }
           ]
         },
         config: {
@@ -243,8 +341,22 @@ Return a JSON object:
       }));
 
       const scriptData = JSON.parse(response.text || '{}') as MovieScript;
-      // Initialize scene status
-      scriptData.scenes = scriptData.scenes.map(s => ({ ...s, status: 'pending' }));
+      // Ensure characterDescriptions exists
+      if (!scriptData.characterDescriptions) {
+        scriptData.characterDescriptions = '';
+      }
+      // Prepend character descriptions to every visualPrompt for consistency
+      const charDesc = scriptData.characterDescriptions;
+      // Initialize scene status and inject character descriptions
+      scriptData.scenes = scriptData.scenes.map(s => ({
+        ...s,
+        status: 'pending',
+        approved: false,
+        // Prepend character descriptions if not already included
+        visualPrompt: charDesc && !s.visualPrompt.includes(charDesc.substring(0, 30))
+          ? `${charDesc}. ${s.visualPrompt}`
+          : s.visualPrompt,
+      }));
       setScript(scriptData);
     } catch (err: any) {
       console.error("Script generation failed:", err);
@@ -304,8 +416,9 @@ Return a JSON object:
     const videoWithRetry = (fn: any) => withRetry(fn, 7, 8000);
 
     const scene = latestScript.scenes[index];
-    const updatedScenes = [...latestScript.scenes];
-    updatedScenes[index].status = 'generating';
+    const updatedScenes = latestScript.scenes.map((s, i) =>
+      i === index ? { ...s, status: 'generating' as const } : s
+    );
     setScript({ ...latestScript, scenes: updatedScenes });
     setIsProcessingVideo(true);
 
@@ -316,63 +429,176 @@ Return a JSON object:
       // Read previous scene from ref to get the latest videoObject (critical for chaining)
       const prevScene = index > 0 ? scriptRef.current?.scenes[index - 1] ?? null : null;
       
-      // 1. Generate TTS for the scene
+      // 1. Generate TTS for the scene (with optional translation)
       let audioUrl = '';
-      try {
-        const ttsText = scene.audioScript || scene.description;
-        // Strip speaker tags and emotional directions for clean TTS, but keep the emotional context in the prompt
-        const cleanTtsText = ttsText
-          .replace(/\([^)]*:\)/g, '') // Remove (מספר:) (דמות:) tags
-          .replace(/\[[^\]]*\]/g, '')  // Remove [בלחש] emotional directions
-          .trim();
-        const emotionalContext = (ttsText.match(/\[[^\]]*\]/g) || []).join(' ');
+      const langConfig = LANGUAGE_CONFIG[selectedLanguages[0] || audioLanguage];
+
+      // Helper: convert PCM bytes to WAV blob URL and return duration
+      const pcmToWav = (pcmBytes: Uint8Array): { url: string; duration: number } => {
+        const sampleRate = 24000;
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+        const blockAlign = numChannels * (bitsPerSample / 8);
+        const dataSize = pcmBytes.length;
+        const duration = dataSize / byteRate;
+        const headerSize = 44;
+
+        const wavBuffer = new ArrayBuffer(headerSize + dataSize);
+        const view = new DataView(wavBuffer);
+        const writeString = (offset: number, str: string) => {
+          for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+        };
+        writeString(0, 'RIFF');
+        view.setUint32(4, 36 + dataSize, true);
+        writeString(8, 'WAVE');
+        writeString(12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitsPerSample, true);
+        writeString(36, 'data');
+        view.setUint32(40, dataSize, true);
+        new Uint8Array(wavBuffer, headerSize).set(pcmBytes);
+
+        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+        return { url: URL.createObjectURL(blob), duration };
+      };
+
+      // Helper: generate TTS and return raw PCM bytes
+      const generateTTS = async (text: string) => {
         const ttsResponse = await withRetry(() => ai.models.generateContent({
           model: "gemini-2.5-flash-preview-tts",
-          contents: [{ parts: [{ text: `Speak this Hebrew text with deep cinematic emotion${emotionalContext ? ` (${emotionalContext})` : ''}. Speak clearly and expressively in Hebrew:\n${cleanTtsText}` }] }],
+          contents: [{ parts: [{ text }] }],
           config: {
             responseModalities: [Modality.AUDIO],
             speechConfig: {
               voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: 'Kore' },
+                prebuiltVoiceConfig: { voiceName: langConfig.voice },
               },
             },
           },
-        }));
+        }), 2, 3000); // Low retries to save quota for Veo
 
-        const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (base64Audio) {
-          const binary = atob(base64Audio);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-          }
-          const blob = new Blob([bytes], { type: 'audio/mpeg' });
-          audioUrl = URL.createObjectURL(blob);
+        const audioPart = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+        if (!audioPart?.data) return null;
+
+        const pcmBinary = atob(audioPart.data);
+        const pcmBytes = new Uint8Array(pcmBinary.length);
+        for (let i = 0; i < pcmBinary.length; i++) {
+          pcmBytes[i] = pcmBinary.charCodeAt(i);
         }
-      } catch (ttsErr) {
-        console.warn("TTS generation failed, continuing with silent video:", ttsErr);
+        return pcmBytes;
+      };
+
+      try {
+        const ttsText = scene.audioScript || scene.description;
+        // Strip speaker tags and emotional directions for clean TTS
+        let cleanTtsText = ttsText
+          .replace(/\([^)]*:\)/g, '') // Remove (מספר:) (דמות:) tags
+          .replace(/\[[^\]]*\]/g, '')  // Remove [בלחש] emotional directions
+          .trim();
+        const emotionalContext = (ttsText.match(/\[[^\]]*\]/g) || []).join(' ');
+
+        // Translate if not Hebrew
+        if ((selectedLanguages[0] || audioLanguage) !== 'he') {
+          console.log(`Translating scene ${index + 1} to ${langConfig.ttsLang}...`);
+          const translationResponse = await withRetry(() => ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [{ parts: [{ text: `Translate the following Hebrew text to ${langConfig.ttsLang}. Return ONLY the translated text, nothing else. Keep the emotional tone and dramatic style. Do not add explanations.\n\n${cleanTtsText}` }] }],
+          }), 2, 3000); // Low retries to save quota for Veo
+          cleanTtsText = translationResponse.text?.trim() || cleanTtsText;
+          console.log(`Translation result: ${cleanTtsText.substring(0, 80)}...`);
+        }
+
+        const maxDuration = 8; // Veo max duration
+        const basePrompt = `Read this ${langConfig.ttsLang} text aloud with cinematic narration style, at a brisk pace with short pauses${emotionalContext ? `, with these emotions: ${emotionalContext}` : ''}`;
+
+        // Single TTS call — instruct fast pace upfront to save API quota
+        let pcmBytes = await generateTTS(`${basePrompt}. Keep the total duration under ${maxDuration} seconds:\n${cleanTtsText}`);
+        if (pcmBytes) {
+          const byteRate = 24000 * 1 * (16 / 8); // sampleRate * channels * bytesPerSample
+          const rawDuration = pcmBytes.length / byteRate;
+          console.log(`TTS scene ${index + 1}: ${rawDuration.toFixed(1)}s`);
+
+          // If too long, smart-trim at silence boundary (no extra API calls)
+          if (rawDuration > maxDuration) {
+            const maxBytes = Math.floor(maxDuration * byteRate);
+            const searchStart = Math.max(0, maxBytes - byteRate * 2); // search in last 2 seconds before cutoff
+            let bestCutPoint = maxBytes;
+            let lowestEnergy = Infinity;
+
+            // Scan in 100ms windows to find quietest point (natural pause between words/sentences)
+            const windowSize = Math.floor(0.1 * byteRate);
+            for (let pos = searchStart; pos < maxBytes - windowSize; pos += Math.floor(0.05 * byteRate)) {
+              let energy = 0;
+              for (let j = pos; j < pos + windowSize; j += 2) {
+                const sample = (pcmBytes[j] | (pcmBytes[j + 1] << 8));
+                const signed = sample > 32767 ? sample - 65536 : sample;
+                energy += Math.abs(signed);
+              }
+              if (energy < lowestEnergy) {
+                lowestEnergy = energy;
+                bestCutPoint = pos + windowSize;
+              }
+            }
+
+            // Align to sample boundary (2 bytes per sample)
+            bestCutPoint = bestCutPoint - (bestCutPoint % 2);
+            pcmBytes = pcmBytes.slice(0, bestCutPoint);
+            console.warn(`TTS scene ${index + 1}: smart-trimmed from ${rawDuration.toFixed(1)}s to ${(pcmBytes.length / byteRate).toFixed(1)}s at silence boundary`);
+          }
+
+          const wav = pcmToWav(pcmBytes);
+          audioUrl = wav.url;
+          (scene as any)._audioDuration = wav.duration;
+          console.log(`TTS scene ${index + 1} final: ${wav.duration.toFixed(1)}s`);
+        }
+      } catch (ttsErr: any) {
+        console.error("TTS generation FAILED:", ttsErr?.message || ttsErr);
+        console.error("TTS error details:", JSON.stringify(ttsErr, null, 2));
       }
 
       // 2. Generate Video
       let operation;
       
-      // Prepare reference images payload
-      const referenceImagesPayload = referenceImages.map(img => ({
-        image: {
-          imageBytes: img.data,
-          mimeType: img.mimeType
+      // Prepare reference images payload — send each image as BOTH ASSET (character) and STYLE (visual style)
+      // This locks both the character appearance AND the visual aesthetic from scene 1
+      const referenceImagesPayload = referenceImages.flatMap(img => [
+        {
+          image: { imageBytes: img.data, mimeType: img.mimeType },
+          referenceType: VideoGenerationReferenceType.ASSET
         },
-        referenceType: VideoGenerationReferenceType.ASSET
-      }));
+        {
+          image: { imageBytes: img.data, mimeType: img.mimeType },
+          referenceType: VideoGenerationReferenceType.STYLE
+        },
+      ]);
+
+      // Always use 8s (Veo max) so video is never shorter than audio
+      const audioDur = (scene as any)._audioDuration as number | undefined;
+      const targetDuration = 8;
+      console.log(`Video scene ${index + 1}: generating ${targetDuration}s video (audio was ${audioDur?.toFixed(1) || 'none'}s)`);
 
       const videoConfig: any = {
         numberOfVideos: 1,
         resolution: '720p',
         aspectRatio: '16:9',
+        durationSeconds: targetDuration,
       };
 
-      // Ensure prompt is not empty as it is mandatory
-      const promptText = scene.visualPrompt?.trim() || scene.description?.trim() || "A cinematic scene...";
+      // Inject character lock description for maximum consistency
+      const charLock = characterImageDescription
+        ? `[CRITICAL CHARACTER LOCK — The character in this scene MUST match this EXACT appearance in every single frame. DO NOT change any physical feature, clothing, or accessory: ${characterImageDescription}]. `
+        : '';
+      // Add seamless transition instruction for scenes 2+
+      const transitionLock = (index > 0 && prevScene)
+        ? `[SEAMLESS CONTINUITY — This scene continues DIRECTLY from the previous scene. Maintain identical lighting, color grading, environment, and character positioning. The first frame of this scene must feel like the natural next frame of the previous scene. No jump cuts, no sudden changes.]. `
+        : '';
+      const promptText = charLock + transitionLock + (scene.visualPrompt?.trim() || scene.description?.trim() || "A cinematic scene...");
 
       if (prevScene && prevScene.videoObject) {
         // Extend the previous video for continuity
@@ -428,8 +654,9 @@ Return a JSON object:
     } catch (err: any) {
       console.error("Video generation failed:", err);
       const currentScript = scriptRef.current!;
-      const finalScenes = [...currentScript.scenes];
-      finalScenes[index].status = 'failed';
+      const finalScenes = currentScript.scenes.map((s, i) =>
+        i === index ? { ...s, status: 'failed' as const } : s
+      );
       setScript({ ...currentScript, scenes: finalScenes });
       
       let errorMessage = "";
@@ -463,24 +690,41 @@ Return a JSON object:
     }
   };
 
-  const generateAllScenes = async () => {
+  // Produce the next eligible scene (first pending scene whose previous is approved, or scene 0)
+  const produceNextScene = async () => {
     const latestScript = scriptRef.current;
     if (!latestScript || !isApiKeySelected || isGeneratingAll || isProcessingVideo) return;
+
+    // Find the next scene that can be produced
+    let nextIndex = -1;
+    for (let i = 0; i < latestScript.scenes.length; i++) {
+      const scene = latestScript.scenes[i];
+      if (scene.status === 'completed') continue;
+      if (scene.status === 'generating') return; // Already producing one
+      // Check approval: scene 0 can always go, others need previous scene approved
+      if (i === 0 || latestScript.scenes[i - 1]?.approved) {
+        nextIndex = i;
+        break;
+      } else {
+        // Previous scene exists but isn't approved — can't proceed
+        setError(`Please approve Scene ${i} before producing Scene ${i + 1}.`);
+        return;
+      }
+    }
+
+    if (nextIndex === -1) {
+      // All scenes are completed
+      return;
+    }
 
     setIsGeneratingAll(true);
     setError(null);
 
     try {
-      for (let i = 0; i < latestScript.scenes.length; i++) {
-        // Always read latest state from ref (previous scene may have updated videoObject)
-        const current = scriptRef.current;
-        if (!current) break;
-        if (current.scenes[i].status === 'completed') continue;
-        await generateVideoForScene(i, true);
-      }
+      await generateVideoForScene(nextIndex, true);
     } catch (err) {
-      console.error("Batch generation failed:", err);
-      setError("Batch generation stopped due to an error.");
+      console.error("Scene generation failed:", err);
+      setError("Scene generation stopped due to an error.");
     } finally {
       setIsGeneratingAll(false);
     }
@@ -494,7 +738,8 @@ Return a JSON object:
       visualPrompt: "Describe the visual details for AI...",
       audioScript: "Enter the dialogue or narration here...",
       durationSeconds: 8,
-      status: 'pending'
+      status: 'pending',
+      approved: false
     };
 
     if (script) {
@@ -504,6 +749,7 @@ Return a JSON object:
         title: "My Custom Movie",
         genre: "Custom",
         style: style,
+        characterDescriptions: '',
         scenes: [newScene]
       });
     }
@@ -525,6 +771,191 @@ Return a JSON object:
     }
   };
 
+  const toggleLanguage = (lang: AudioLanguage) => {
+    setSelectedLanguages(prev =>
+      prev.includes(lang) ? prev.filter(l => l !== lang) : [...prev, lang]
+    );
+  };
+
+  const approveScene = (id: string) => {
+    if (!script) return;
+    const updatedScenes = script.scenes.map(s => s.id === id ? { ...s, approved: true } : s);
+    setScript({ ...script, scenes: updatedScenes });
+  };
+
+  const downloadSceneVideo = (scene: Scene, lang?: string) => {
+    const url = lang && scene.langMedia?.[lang]?.videoUrl ? scene.langMedia[lang].videoUrl : scene.videoUrl;
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${script?.title || 'movie'}_${scene.title}_${lang || 'he'}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const downloadSceneAudio = (scene: Scene, lang?: string) => {
+    const url = lang && scene.langMedia?.[lang]?.audioUrl ? scene.langMedia[lang].audioUrl : scene.audioUrl;
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${script?.title || 'movie'}_${scene.title}_${lang || 'he'}_audio.wav`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const canProduceScene = (index: number): boolean => {
+    if (index === 0) return true;
+    const prevScene = script?.scenes[index - 1];
+    return !!prevScene?.approved;
+  };
+
+  // ===== EXPORT MOVIE: Merge all scenes into single MP4 with audio =====
+  const ffmpegRef = useRef<FFmpeg | null>(null);
+
+  const exportMovie = async () => {
+    if (!script) return;
+    const completedScenes = script.scenes.filter(s => s.status === 'completed' && s.videoUrl);
+    if (completedScenes.length === 0) return;
+
+    setExportStatus('loading-ffmpeg');
+    setExportProgress(0);
+    setExportProgressMsg('Loading video engine...');
+    if (exportUrl) { URL.revokeObjectURL(exportUrl); setExportUrl(null); }
+
+    try {
+      // 1. Load FFmpeg (lazy singleton)
+      if (!ffmpegRef.current) {
+        const ffmpeg = new FFmpeg();
+        ffmpeg.on('log', ({ message }) => {
+          console.log('[FFmpeg]', message);
+        });
+        ffmpeg.on('progress', ({ progress }) => {
+          // progress is 0-1 for current operation
+          setExportProgress(prev => Math.max(prev, Math.round(progress * 100)));
+        });
+        const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+        await ffmpeg.load({
+          coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+          wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+        });
+        ffmpegRef.current = ffmpeg;
+      }
+
+      const ffmpeg = ffmpegRef.current;
+      setExportStatus('processing');
+
+      // 2. Process each scene: mux video + audio into individual MP4 clips
+      const clipFiles: string[] = [];
+
+      for (let i = 0; i < completedScenes.length; i++) {
+        const scene = completedScenes[i];
+        const sceneNum = String(i).padStart(3, '0');
+        setExportProgressMsg(`Processing scene ${i + 1}/${completedScenes.length}...`);
+        setExportProgress(Math.round((i / completedScenes.length) * 80));
+
+        // Get audio URL for selected language
+        const audioUrl = scene.langMedia?.[exportLanguage]?.audioUrl || scene.audioUrl;
+
+        // Write video to FS
+        const videoBlob = await fetch(scene.videoUrl!).then(r => r.blob());
+        await ffmpeg.writeFile(`scene_${sceneNum}.webm`, await fetchFile(videoBlob));
+
+        if (audioUrl) {
+          // Write audio to FS
+          const audioBlob = await fetch(audioUrl).then(r => r.blob());
+          await ffmpeg.writeFile(`scene_${sceneNum}.wav`, await fetchFile(audioBlob));
+
+          // Mux video + audio → MP4
+          await ffmpeg.exec([
+            '-i', `scene_${sceneNum}.webm`,
+            '-i', `scene_${sceneNum}.wav`,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
+            '-shortest',
+            '-movflags', '+faststart',
+            `clip_${sceneNum}.mp4`
+          ]);
+
+          // Cleanup source files
+          await ffmpeg.deleteFile(`scene_${sceneNum}.webm`);
+          await ffmpeg.deleteFile(`scene_${sceneNum}.wav`);
+        } else {
+          // No audio — mux video with silent audio
+          await ffmpeg.exec([
+            '-i', `scene_${sceneNum}.webm`,
+            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-shortest',
+            '-movflags', '+faststart',
+            `clip_${sceneNum}.mp4`
+          ]);
+          await ffmpeg.deleteFile(`scene_${sceneNum}.webm`);
+        }
+
+        clipFiles.push(`clip_${sceneNum}.mp4`);
+      }
+
+      // 3. Create concat file list
+      setExportProgressMsg('Merging scenes...');
+      setExportProgress(85);
+      const concatList = clipFiles.map(f => `file '${f}'`).join('\n');
+      await ffmpeg.writeFile('filelist.txt', concatList);
+
+      // 4. Concat all clips into final movie
+      await ffmpeg.exec([
+        '-f', 'concat', '-safe', '0',
+        '-i', 'filelist.txt',
+        '-c', 'copy',
+        '-movflags', '+faststart',
+        'output.mp4'
+      ]);
+
+      // 5. Read output and create download URL
+      setExportProgressMsg('Preparing download...');
+      setExportProgress(95);
+      const outputData = await ffmpeg.readFile('output.mp4');
+      const outputBlob = new Blob([outputData], { type: 'video/mp4' });
+      const url = URL.createObjectURL(outputBlob);
+      setExportUrl(url);
+
+      // 6. Cleanup
+      for (const f of clipFiles) {
+        try { await ffmpeg.deleteFile(f); } catch {}
+      }
+      try { await ffmpeg.deleteFile('filelist.txt'); } catch {}
+      try { await ffmpeg.deleteFile('output.mp4'); } catch {}
+
+      setExportStatus('done');
+      setExportProgress(100);
+      setExportProgressMsg('Ready!');
+    } catch (err: any) {
+      console.error('Export failed:', err);
+      setExportStatus('error');
+      setExportProgressMsg(err.message || 'Export failed');
+    }
+  };
+
+  const downloadExportedMovie = () => {
+    if (!exportUrl) return;
+    const a = document.createElement('a');
+    a.href = exportUrl;
+    a.download = `${script?.title || 'movie'}_${LANGUAGE_CONFIG[exportLanguage].label}.mp4`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const WIZARD_STEPS: { key: WizardStep; label: string; icon: React.ReactNode }[] = [
+    { key: 'story', label: 'Story', icon: <Wand2 className="w-4 h-4" /> },
+    { key: 'style', label: 'Style', icon: <Palette className="w-4 h-4" /> },
+    { key: 'language', label: 'Language', icon: <Globe className="w-4 h-4" /> },
+    { key: 'timeline', label: 'Timeline', icon: <Clock className="w-4 h-4" /> },
+    { key: 'preview', label: 'Preview', icon: <Play className="w-4 h-4" /> },
+  ];
+
   const styles: { name: MovieStyle; icon: React.ReactNode; color: string; description: string }[] = [
     { name: 'Pixar', icon: <Clapperboard className="w-4 h-4" />, color: 'from-blue-500 to-cyan-500', description: '3D animated charm' },
     { name: 'Realistic', icon: <Film className="w-4 h-4" />, color: 'from-emerald-500 to-teal-500', description: 'Cinematic realism' },
@@ -534,60 +965,52 @@ Return a JSON object:
   ];
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white font-sans selection:bg-blue-500/30 overflow-x-hidden">
-      {/* Background Glow */}
+    <div className="min-h-screen text-white font-sans selection:bg-blue-500/30 overflow-x-hidden" style={{ background: 'var(--bg-primary)' }}>
+      {/* Background Glow - subtle */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-[20%] -left-[10%] w-[70%] h-[70%] bg-blue-600/10 blur-[120px] rounded-full" />
-        <div className="absolute -bottom-[20%] -right-[10%] w-[70%] h-[70%] bg-purple-600/10 blur-[120px] rounded-full" />
+        <div className="absolute -top-[30%] -left-[15%] w-[60%] h-[60%] bg-blue-600/[0.06] blur-[150px] rounded-full" />
+        <div className="absolute -bottom-[30%] -right-[15%] w-[60%] h-[60%] bg-indigo-600/[0.06] blur-[150px] rounded-full" />
       </div>
 
-      {/* Header */}
-      <header className="border-b border-white/5 bg-black/40 backdrop-blur-xl sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <motion.div 
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              className="w-9 h-9 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20"
-            >
-              <Film className="w-5 h-5 text-white" />
-            </motion.div>
-            <div className="hidden sm:block">
-              <h1 className="font-bold text-base tracking-tight leading-none">Cinematic Studio</h1>
-              <p className="text-[9px] text-white/30 uppercase tracking-[0.2em] font-bold mt-1">Pro AI Engine</p>
+      {/* HEADER */}
+      <header className="border-b border-[--border-subtle] bg-[--bg-elevated]/80 backdrop-blur-xl sticky top-0 z-50">
+        <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
+          {/* Logo */}
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 bg-gradient-to-br from-[--accent] to-indigo-500 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
+              <Film className="w-4 h-4 text-white" />
             </div>
+            <span className="font-bold text-sm tracking-tight hidden sm:block">Cinematic Studio</span>
           </div>
 
-          {/* Mobile Tab Switcher */}
-          <div className="flex bg-white/5 p-1 rounded-full border border-white/10 md:hidden">
-            {(['script', 'timeline', 'preview'] as const).map((tab) => (
+          {/* Step Indicator */}
+          <div className="flex items-center gap-1">
+            {WIZARD_STEPS.map((step, i) => (
               <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
+                key={step.key}
+                onClick={() => setWizardStep(step.key)}
                 className={cn(
-                  "px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all",
-                  activeTab === tab ? "bg-white text-black shadow-lg" : "text-white/40"
+                  "relative flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all",
+                  wizardStep === step.key ? "text-white" : "text-[--text-muted] hover:text-[--text-secondary]"
                 )}
               >
-                {tab}
+                {wizardStep === step.key && (
+                  <motion.div layoutId="step-pill" className="absolute inset-0 bg-[--accent-soft] border border-[--accent]/30 rounded-full" />
+                )}
+                <span className="relative z-10 hidden sm:inline">{step.icon}</span>
+                <span className="relative z-10">{step.label}</span>
               </button>
             ))}
           </div>
 
-          <div className="flex items-center gap-3">
+          {/* Status */}
+          <div className="flex items-center gap-2">
             {!isApiKeySelected && (
-              <button 
-                onClick={handleOpenKeyDialog}
-                className="p-2 sm:px-4 sm:py-2 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-xl text-xs font-bold hover:bg-amber-500/20 transition-all flex items-center gap-2"
-              >
-                <Settings className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Connect Key</span>
+              <button onClick={handleOpenKeyDialog} className="px-3 py-1.5 bg-[--warning-soft] text-[--warning] border border-[--warning]/20 rounded-lg text-xs font-medium">
+                <Settings className="w-3.5 h-3.5 inline mr-1" />Connect
               </button>
             )}
-            <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-full border border-white/10">
-              <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-              <span className="text-[10px] font-bold text-white/40 uppercase">Ready</span>
-            </div>
+            <div className="w-2 h-2 bg-[--success] rounded-full animate-pulse" />
           </div>
         </div>
       </header>
@@ -595,21 +1018,14 @@ Return a JSON object:
       {/* Error Banner */}
       <AnimatePresence>
         {error && (
-          <motion.div 
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="bg-red-500/10 border-b border-red-500/20 overflow-hidden"
-          >
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3 text-red-400">
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+            className="bg-[--danger-soft] border-b border-[--danger]/20 overflow-hidden">
+            <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-[--danger]">
                 <AlertCircle className="w-4 h-4 shrink-0" />
-                <p className="text-xs font-medium leading-relaxed">{error}</p>
+                <p className="text-xs font-medium">{error}</p>
               </div>
-              <button 
-                onClick={() => setError(null)}
-                className="p-1 hover:bg-red-500/10 rounded-lg text-red-400 transition-colors"
-              >
+              <button onClick={() => setError(null)} className="p-1 hover:bg-[--danger-soft] rounded-lg text-[--danger]">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -617,434 +1033,592 @@ Return a JSON object:
         )}
       </AnimatePresence>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 md:py-10">
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
-          
-          {/* Left Panel: Script (Visible on desktop or when script tab active) */}
-          <div className={cn(
-            "md:col-span-4 space-y-8 transition-all",
-            activeTab !== 'script' && "hidden md:block"
-          )}>
-            <section className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-1 h-4 bg-blue-500 rounded-full" />
-                  <h2 className="text-xs font-bold text-white/40 uppercase tracking-widest">The Story</h2>
-                </div>
-                <div className="flex items-center gap-3">
-                  <button 
-                    onClick={() => setBeCreative(!beCreative)}
-                    className="flex items-center gap-2 group"
-                  >
-                    <span className="text-[9px] text-white/30 font-bold uppercase group-hover:text-white/60 transition-colors">Creative</span>
-                    <div className={cn(
-                      "w-7 h-3.5 rounded-full transition-colors relative",
-                      beCreative ? "bg-blue-600" : "bg-white/10"
-                    )}>
-                      <motion.div 
-                        animate={{ x: beCreative ? 14 : 2 }}
-                        className="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full" 
-                      />
-                    </div>
-                  </button>
-                  <button 
-                    onClick={() => setIsManualMode(!isManualMode)}
-                    className="flex items-center gap-2 group"
-                  >
-                    <span className="text-[9px] text-white/30 font-bold uppercase group-hover:text-white/60 transition-colors">Manual</span>
-                    <div className={cn(
-                      "w-7 h-3.5 rounded-full transition-colors relative",
-                      isManualMode ? "bg-amber-600" : "bg-white/10"
-                    )}>
-                      <motion.div 
-                        animate={{ x: isManualMode ? 14 : 2 }}
-                        className="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full" 
-                      />
-                    </div>
-                  </button>
-                </div>
-              </div>
-              
-              <div className="relative group">
-                <textarea 
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  placeholder={isManualMode ? "Paste your full script or book excerpt here..." : "Describe your movie idea in a few sentences..."}
-                  className="w-full h-48 bg-white/[0.03] border border-white/10 rounded-2xl p-5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/40 transition-all resize-none placeholder:text-white/10 leading-relaxed"
-                />
-                <div className="absolute bottom-4 right-4">
-                  {isManualMode ? (
-                    <button 
-                      onClick={addManualScene}
-                      className="p-3 bg-amber-600 hover:bg-amber-500 rounded-xl shadow-xl shadow-amber-600/20 transition-all active:scale-95"
-                    >
-                      <Plus className="w-5 h-5" />
-                    </button>
-                  ) : (
-                    <button 
-                      onClick={generateScript}
-                      disabled={isGeneratingScript || !prompt.trim()}
-                      className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-xs font-bold flex items-center gap-2 shadow-xl shadow-blue-600/20 transition-all active:scale-95"
-                    >
-                      {isGeneratingScript ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                      {script ? 'Refine' : 'Generate'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </section>
+      {/* MAIN CONTENT */}
+      <main className="max-w-5xl mx-auto px-4 py-8 pb-28">
+        <AnimatePresence mode="wait">
 
-            <section className="space-y-4">
-              <div className="flex items-center gap-2">
-                <div className="w-1 h-4 bg-purple-500 rounded-full" />
-                <h2 className="text-xs font-bold text-white/40 uppercase tracking-widest">Visual Style</h2>
+          {/* ===== STEP 1: STORY ===== */}
+          {wizardStep === 'story' && (
+            <motion.div key="story" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-2xl mx-auto space-y-6">
+              <div className="text-center space-y-2">
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Tell your story</h1>
+                <p className="text-sm text-[--text-muted]">Paste a book excerpt, script, or describe your movie idea</p>
               </div>
-              <div className="grid grid-cols-1 gap-2">
+
+              {/* Toggles */}
+              <div className="flex items-center justify-center gap-4">
+                <button onClick={() => setBeCreative(!beCreative)}
+                  className={cn("flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium border transition-all",
+                    beCreative ? "bg-[--accent-soft] border-[--accent]/30 text-[--accent]" : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted]")}>
+                  <Sparkles className="w-3.5 h-3.5" />{beCreative ? 'Creative Mode' : 'Strict Mode'}
+                </button>
+                <button onClick={() => setIsManualMode(!isManualMode)}
+                  className={cn("flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium border transition-all",
+                    isManualMode ? "bg-[--warning-soft] border-[--warning]/30 text-[--warning]" : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted]")}>
+                  <Settings className="w-3.5 h-3.5" />{isManualMode ? 'Manual Mode' : 'AI Mode'}
+                </button>
+              </div>
+
+              {/* Textarea */}
+              <div className="relative group">
+                <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)}
+                  placeholder={isManualMode ? "Paste your full script or book excerpt here..." : "Describe your movie idea..."}
+                  className="w-full min-h-48 sm:min-h-56 bg-[--bg-card] border border-[--border-subtle] rounded-2xl p-5 text-sm text-[--text-primary] focus:outline-none focus:ring-2 focus:ring-[--accent]/20 focus:border-[--accent]/40 transition-all resize-y placeholder:text-[--text-muted] leading-relaxed overflow-y-auto"
+                />
+                <div className="absolute bottom-4 right-4 text-xs text-[--text-muted] font-medium">
+                  {prompt.length > 0 ? `${prompt.split(/\s+/).filter(Boolean).length} words` : ''}
+                </div>
+              </div>
+
+              {/* Next Button */}
+              <div className="flex justify-end">
+                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                  onClick={() => setWizardStep('style')}
+                  disabled={!prompt.trim()}
+                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20">
+                  Next <ArrowRight className="w-4 h-4" />
+                </motion.button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ===== STEP 2: STYLE & CHARACTERS ===== */}
+          {wizardStep === 'style' && (
+            <motion.div key="style" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-3xl mx-auto space-y-8">
+              <div className="text-center space-y-2">
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Choose your style</h1>
+                <p className="text-sm text-[--text-muted]">Pick a visual style and upload character references</p>
+              </div>
+
+              {/* Style Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                 {styles.map((s) => (
-                  <button
-                    key={s.name}
+                  <motion.button key={s.name} whileHover={{ y: -2 }} whileTap={{ scale: 0.97 }}
                     onClick={() => setStyle(s.name)}
                     className={cn(
-                      "flex items-center gap-4 p-3 rounded-2xl border transition-all text-left group",
-                      style === s.name 
-                        ? "bg-white/10 border-white/20 ring-1 ring-white/20" 
-                        : "bg-white/[0.02] border-white/5 hover:bg-white/5"
-                    )}
-                  >
-                    <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center bg-gradient-to-br shadow-lg", s.color)}>
+                      "relative flex flex-col items-center gap-3 p-4 pb-5 rounded-2xl border transition-all text-center",
+                      style === s.name
+                        ? "bg-[--bg-card-active] border-[--accent]/40 ring-1 ring-[--accent]/20 shadow-lg shadow-[--accent]/10"
+                        : "bg-[--bg-card] border-[--border-subtle] hover:bg-[--bg-card-hover]"
+                    )}>
+                    <div className={cn("w-12 h-12 rounded-xl flex items-center justify-center bg-gradient-to-br shadow-lg", s.color)}>
                       {s.icon}
                     </div>
                     <div>
                       <p className="text-xs font-bold">{s.name}</p>
-                      <p className="text-[10px] text-white/30 font-medium">{s.description}</p>
+                      <p className="text-[11px] text-[--text-muted]">{s.description}</p>
                     </div>
                     {style === s.name && (
-                      <motion.div layoutId="style-check" className="ml-auto pr-2">
-                        <CheckCircle2 className="w-4 h-4 text-blue-500" />
+                      <motion.div layoutId="style-check" className="absolute top-2 right-2">
+                        <CheckCircle2 className="w-4 h-4 text-[--accent]" />
                       </motion.div>
                     )}
-                  </button>
+                  </motion.button>
                 ))}
               </div>
-            </section>
 
-            <section className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-1 h-4 bg-emerald-500 rounded-full" />
-                  <h2 className="text-xs font-bold text-white/40 uppercase tracking-widest">Characters & Atmosphere</h2>
+              {/* Reference Images */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-[--text-secondary]">Character & Atmosphere References</h3>
+                  <span className="text-xs font-medium text-[--text-muted]">{referenceImages.length}/3</span>
                 </div>
-                <span className="text-[10px] font-bold text-white/20">{referenceImages.length}/3</span>
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                {referenceImages.map((img) => (
-                  <motion.div 
-                    layout
-                    key={img.id} 
-                    className="aspect-square bg-white/5 rounded-2xl border border-white/10 relative group overflow-hidden shadow-inner"
-                  >
-                    <img src={img.previewUrl} className="w-full h-full object-cover" alt="Reference" />
-                    <button 
-                      onClick={() => removeReferenceImage(img.id)}
-                      className="absolute inset-0 bg-red-600/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm"
-                    >
-                      <Trash2 className="w-5 h-5" />
-                    </button>
-                  </motion.div>
-                ))}
-                {referenceImages.length < 3 && (
-                  <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="aspect-square bg-white/[0.03] border-2 border-dashed border-white/10 rounded-2xl flex flex-col items-center justify-center gap-2 hover:bg-white/5 hover:border-white/20 transition-all group"
-                  >
-                    <Upload className="w-5 h-5 text-white/20 group-hover:text-white/40 transition-colors" />
-                    <span className="text-[9px] font-bold text-white/20 uppercase">Add Ref</span>
-                  </button>
-                )}
-              </div>
-              <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" multiple className="hidden" />
-            </section>
-          </div>
-
-          {/* Right Panel: Production (Timeline & Preview) */}
-          <div className={cn(
-            "md:col-span-8 space-y-8",
-            activeTab === 'script' && "hidden md:block"
-          )}>
-            
-            {/* Video Preview Section */}
-            <div className={cn(
-              "space-y-4",
-              activeTab !== 'preview' && "hidden md:block"
-            )}>
-              <div className="aspect-video bg-black rounded-[2rem] overflow-hidden border border-white/10 relative group shadow-2xl ring-1 ring-white/5">
-                {currentSceneIndex !== null && script?.scenes[currentSceneIndex]?.videoUrl ? (
-                  <>
-                    <video 
-                      ref={videoRef}
-                      src={script.scenes[currentSceneIndex].videoUrl}
-                      controls
-                      autoPlay
-                      className="w-full h-full object-cover"
-                    />
-                    {script.scenes[currentSceneIndex].audioUrl && (
-                      <audio 
-                        ref={audioRef}
-                        src={script.scenes[currentSceneIndex].audioUrl}
-                        className="hidden"
-                      />
-                    )}
-                  </>
-                ) : (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-white/10">
-                    <div className="w-24 h-24 rounded-full border border-white/5 flex items-center justify-center mb-6 bg-white/[0.02]">
-                      <Clapperboard className="w-10 h-10" />
-                    </div>
-                    <p className="text-sm font-bold tracking-widest uppercase opacity-40">Awaiting Production</p>
-                  </div>
-                )}
-                
-                <AnimatePresence>
-                  {isProcessingVideo && (
-                    <motion.div 
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      className="absolute inset-0 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center z-10"
-                    >
-                      <div className="relative">
-                        <Loader2 className="w-16 h-16 text-blue-500 animate-spin mb-6" />
-                        <div className="absolute inset-0 blur-xl bg-blue-500/20 animate-pulse" />
-                      </div>
-                      <p className="text-xl font-black tracking-tighter uppercase italic">Rendering Magic</p>
-                      <p className="text-[10px] text-white/40 font-bold uppercase tracking-[0.3em] mt-2">Scene {currentSceneIndex !== null ? currentSceneIndex + 1 : ''} in progress</p>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                  {referenceImages.map((img) => (
+                    <motion.div layout key={img.id} className="aspect-square bg-[--bg-card] rounded-xl border border-[--border-subtle] relative group overflow-hidden">
+                      <img src={img.previewUrl} className="w-full h-full object-cover rounded-xl" alt="Reference" />
+                      <button onClick={() => removeReferenceImage(img.id)}
+                        className="absolute inset-0 bg-red-600/70 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm rounded-xl">
+                        <Trash2 className="w-5 h-5" />
+                      </button>
                     </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              {script && currentSceneIndex !== null && (
-                <div className="p-6 bg-white/[0.03] border border-white/10 rounded-3xl backdrop-blur-sm">
-                  <div className="flex items-center gap-3 mb-3">
-                    <span className="text-[10px] font-black text-blue-500 bg-blue-500/10 px-2 py-1 rounded-md uppercase tracking-wider">Now Playing</span>
-                    <h3 className="font-bold text-lg">{script.scenes[currentSceneIndex].title}</h3>
-                  </div>
-                  <p className="text-sm text-white/50 leading-relaxed italic mb-4">"{script.scenes[currentSceneIndex].description}"</p>
-                  {script.scenes[currentSceneIndex].audioScript && (
-                    <div className="pt-4 border-t border-white/5">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Wand2 className="w-3 h-3 text-blue-500" />
-                        <span className="text-[10px] font-black text-white/30 uppercase tracking-widest">Audio Script</span>
-                      </div>
-                      <p className="text-xs text-white/70 leading-relaxed font-medium">
-                        {script.scenes[currentSceneIndex].audioScript}
-                      </p>
-                    </div>
+                  ))}
+                  {referenceImages.length < 3 && (
+                    <button onClick={() => fileInputRef.current?.click()}
+                      className="aspect-square bg-[--bg-card] border-2 border-dashed border-[--border-subtle] rounded-xl flex flex-col items-center justify-center gap-2 hover:bg-[--bg-card-hover] hover:border-[--text-muted] transition-all">
+                      <Upload className="w-5 h-5 text-[--text-muted]" />
+                      <span className="text-[11px] font-medium text-[--text-muted]">Upload</span>
+                    </button>
                   )}
                 </div>
-              )}
-            </div>
+                <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" multiple className="hidden" />
+              </div>
 
-            {/* Timeline Section */}
-            <div className={cn(
-              "space-y-6",
-              activeTab === 'preview' && "hidden md:block"
-            )}>
+              {/* Navigation */}
+              <div className="flex justify-between">
+                <button onClick={() => setWizardStep('story')}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
+                  <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                  onClick={() => setWizardStep('language')}
+                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-blue-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20">
+                  Next <ArrowRight className="w-4 h-4" />
+                </motion.button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ===== STEP 3: LANGUAGE & GENERATE ===== */}
+          {wizardStep === 'language' && (
+            <motion.div key="language" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-xl mx-auto space-y-8">
+              <div className="text-center space-y-2">
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Select languages</h1>
+                <p className="text-sm text-[--text-muted]">Choose one or more languages for dubbing</p>
+              </div>
+
+              {/* Language Cards - Multi-Select */}
+              <div className="space-y-3">
+                {(Object.entries(LANGUAGE_CONFIG) as [AudioLanguage, typeof LANGUAGE_CONFIG['he']][]).map(([code, config]) => (
+                  <motion.button key={code} whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.99 }}
+                    onClick={() => toggleLanguage(code)}
+                    className={cn(
+                      "w-full flex items-center gap-4 p-5 rounded-2xl border transition-all text-left",
+                      selectedLanguages.includes(code)
+                        ? "bg-[--accent-soft] border-[--accent]/30 ring-1 ring-[--accent]/20"
+                        : "bg-[--bg-card] border-[--border-subtle] hover:bg-[--bg-card-hover]"
+                    )}>
+                    <span className="text-3xl">{config.flag}</span>
+                    <div className="flex-1">
+                      <p className="text-base font-bold">{config.label}</p>
+                      <p className="text-xs text-[--text-muted]">Voice: {config.voice}</p>
+                    </div>
+                    {selectedLanguages.includes(code) && (
+                      <CheckCircle2 className="w-5 h-5 text-[--accent]" />
+                    )}
+                  </motion.button>
+                ))}
+              </div>
+
+              {/* Generate Button */}
+              <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                onClick={() => { generateScript(); setWizardStep('timeline'); }}
+                disabled={isGeneratingScript || !prompt.trim() || selectedLanguages.length === 0}
+                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-[--accent] to-indigo-500 hover:from-blue-500 hover:to-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed rounded-2xl text-base font-bold transition-all shadow-xl shadow-blue-500/20">
+                {isGeneratingScript ? <><Loader2 className="w-5 h-5 animate-spin" /> Creating your movie script...</> : <><Sparkles className="w-5 h-5" /> Generate Script</>}
+              </motion.button>
+
+              {/* Navigation */}
+              <div className="flex justify-start">
+                <button onClick={() => setWizardStep('style')}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
+                  <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ===== STEP 4: TIMELINE ===== */}
+          {wizardStep === 'timeline' && (
+            <motion.div key="timeline" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-3xl mx-auto space-y-6">
+
+              {/* Timeline Header */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h2 className="text-2xl font-black tracking-tight flex items-center gap-3">
-                    {script ? script.title : 'Timeline'}
-                    {script && <span className="text-xs font-medium text-white/20 bg-white/5 px-2 py-1 rounded-full">{script.scenes.length} Scenes</span>}
-                  </h2>
+                  <h1 className="text-2xl font-bold tracking-tight">{script?.title || 'Timeline'}</h1>
+                  {script && <p className="text-xs text-[--text-muted] mt-1">{script.scenes.length} scenes | {selectedLanguages.map(l => LANGUAGE_CONFIG[l].flag).join(' ')}</p>}
                 </div>
-                
                 <div className="flex items-center gap-2">
                   {script && (
-                    <button
-                      onClick={generateAllScenes}
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                      onClick={produceNextScene}
                       disabled={isGeneratingAll || isProcessingVideo || !isApiKeySelected}
-                      className="flex-1 sm:flex-none px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-2xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-600/20"
-                    >
-                      {isGeneratingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
-                      {isGeneratingAll ? 'Processing...' : 'Produce All'}
-                    </button>
+                      className="flex items-center gap-2 px-5 py-2.5 bg-[--success] hover:bg-emerald-400 text-black disabled:opacity-40 rounded-xl text-xs font-bold uppercase tracking-wide transition-all shadow-lg shadow-emerald-500/20">
+                      {isGeneratingAll ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : <><Play className="w-4 h-4 fill-current" /> Produce Next</>}
+                    </motion.button>
                   )}
-                  <button
-                    onClick={addManualScene}
-                    className="p-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl transition-all"
-                    title="Add Scene"
-                  >
-                    <Plus className="w-5 h-5" />
+                  <button onClick={addManualScene} className="p-2.5 bg-[--bg-card] hover:bg-[--bg-card-hover] border border-[--border-subtle] rounded-xl transition-all">
+                    <Plus className="w-4 h-4" />
                   </button>
                 </div>
               </div>
 
-              <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar pb-20 md:pb-0">
+              {/* Batch Progress */}
+              {isGeneratingAll && script && (
+                <div className="bg-[--bg-card] rounded-xl p-4 border border-[--border-subtle]">
+                  <div className="flex items-center justify-between text-xs font-medium mb-2">
+                    <span className="text-[--text-secondary]">Producing scenes...</span>
+                    <span className="text-[--accent]">{script.scenes.filter(s => s.status === 'completed').length}/{script.scenes.length}</span>
+                  </div>
+                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <motion.div className="h-full bg-[--accent] rounded-full"
+                      animate={{ width: `${(script.scenes.filter(s => s.status === 'completed').length / script.scenes.length) * 100}%` }}
+                      transition={{ duration: 0.5 }} />
+                  </div>
+                </div>
+              )}
+
+              {/* Scene Cards */}
+              <div className="space-y-3">
                 <AnimatePresence mode="popLayout">
                   {script?.scenes.map((scene, index) => (
-                    <motion.div
-                      key={scene.id}
-                      layout
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
+                    <motion.div key={scene.id} layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: index * 0.03 }}
                       className={cn(
-                        "p-5 rounded-[2rem] border transition-all group relative overflow-hidden",
-                        currentSceneIndex === index 
-                          ? "bg-white/[0.08] border-white/20 ring-1 ring-white/20 shadow-2xl" 
-                          : "bg-white/[0.03] border-white/5 hover:bg-white/[0.05]"
-                      )}
-                    >
+                        "p-4 sm:p-5 rounded-2xl border transition-all",
+                        scene.approved ? "bg-[--success-soft] border-[--success]/20" :
+                        currentSceneIndex === index ? "bg-[--bg-card-active] border-[--border-active] shadow-lg" :
+                        "bg-[--bg-card] border-[--border-subtle] hover:bg-[--bg-card-hover]"
+                      )}>
+
                       {editingSceneId === scene.id ? (
-                        <div className="space-y-4">
+                        /* Edit Mode */
+                        <div className="space-y-3">
                           <div className="flex items-center justify-between">
-                            <h3 className="font-black text-[10px] text-blue-500 uppercase tracking-[0.2em]">Edit Scene {index + 1}</h3>
-                            <button onClick={() => setEditingSceneId(null)} className="p-1.5 hover:bg-white/10 rounded-xl">
-                              <X className="w-4 h-4" />
-                            </button>
+                            <span className="text-xs font-bold text-[--accent] uppercase tracking-wide">Edit Scene {index + 1}</span>
+                            <button onClick={() => setEditingSceneId(null)} className="p-1.5 hover:bg-white/10 rounded-lg"><X className="w-4 h-4" /></button>
                           </div>
-                          <div className="space-y-3">
-                            <input 
-                              value={scene.title}
-                              onChange={(e) => updateScene(scene.id, { title: e.target.value })}
-                              className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-sm focus:outline-none focus:border-blue-500/50"
-                              placeholder="Scene Title"
-                            />
-                            <textarea 
-                              value={scene.description}
-                              onChange={(e) => updateScene(scene.id, { description: e.target.value })}
-                              className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-sm h-20 resize-none focus:outline-none focus:border-blue-500/50"
-                              placeholder="What happens in this scene?"
-                            />
-                            <textarea 
-                              value={scene.visualPrompt}
-                              onChange={(e) => updateScene(scene.id, { visualPrompt: e.target.value })}
-                              className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-sm h-24 resize-none focus:outline-none focus:border-blue-500/50"
-                              placeholder="Visual details for the AI..."
-                            />
-                            <textarea 
-                              value={scene.audioScript}
-                              onChange={(e) => updateScene(scene.id, { audioScript: e.target.value })}
-                              className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-sm h-20 resize-none focus:outline-none focus:border-blue-500/50"
-                              placeholder="Dialogue or Narration (Audio Text)"
-                            />
-                          </div>
-                          <button 
-                            onClick={() => setEditingSceneId(null)}
-                            className="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase tracking-widest transition-all"
-                          >
-                            Save Scene
-                          </button>
+                          <input value={scene.title} onChange={(e) => updateScene(scene.id, { title: e.target.value })}
+                            className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm focus:outline-none focus:border-[--accent]/50" placeholder="Scene Title" />
+                          <textarea value={scene.description} onChange={(e) => updateScene(scene.id, { description: e.target.value })}
+                            className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm h-20 resize-none focus:outline-none focus:border-[--accent]/50" placeholder="Description" />
+                          <textarea value={scene.visualPrompt} onChange={(e) => updateScene(scene.id, { visualPrompt: e.target.value })}
+                            className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm h-24 resize-none focus:outline-none focus:border-[--accent]/50" placeholder="Visual prompt for AI..." />
+                          <textarea value={scene.audioScript} onChange={(e) => updateScene(scene.id, { audioScript: e.target.value })}
+                            className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm h-20 resize-none focus:outline-none focus:border-[--accent]/50" placeholder="Audio script (dialogue/narration)" />
+                          <button onClick={() => setEditingSceneId(null)}
+                            className="w-full py-2.5 bg-[--accent] hover:bg-blue-500 rounded-xl text-xs font-bold uppercase tracking-wide transition-all">Done</button>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-5">
-                          {/* Scene Number & Status */}
-                          <div className="flex flex-col items-center gap-2 shrink-0">
-                            <div className={cn(
-                              "w-12 h-12 rounded-2xl flex items-center justify-center font-black text-lg shadow-inner",
-                              scene.status === 'completed' ? "bg-emerald-500/20 text-emerald-500" : "bg-white/5 text-white/20"
-                            )}>
-                              {index + 1}
-                            </div>
-                            {scene.status === 'completed' && <CheckCircle2 className="w-4 h-4 text-emerald-500" />}
-                          </div>
+                        /* View Mode */
+                        <>
+                          <div className="flex items-center gap-4">
+                            {/* Number */}
+                            <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold shrink-0",
+                              scene.status === 'completed' ? "bg-[--success-soft] text-[--success]" :
+                              scene.status === 'generating' ? "bg-[--accent-soft] text-[--accent]" :
+                              "bg-white/5 text-[--text-muted]"
+                            )}>{index + 1}</div>
 
-                          {/* Content */}
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-3 mb-1">
-                              <h3 className="font-bold text-base truncate">{scene.title}</h3>
-                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button onClick={() => setEditingSceneId(scene.id)} className="p-1.5 hover:bg-white/10 rounded-lg text-white/30 hover:text-white"><Settings className="w-3.5 h-3.5" /></button>
-                                <button onClick={() => deleteScene(scene.id)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/30 hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                            {/* Content */}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <h3 className="font-semibold text-sm truncate">{scene.title}</h3>
+                                {/* Status Pill */}
+                                {scene.status === 'completed' && scene.approved && (
+                                  <span className="px-2 py-0.5 bg-[--success-soft] text-[--success] text-[10px] font-bold rounded-full uppercase">Approved</span>
+                                )}
+                                {scene.status === 'completed' && !scene.approved && (
+                                  <span className="px-2 py-0.5 bg-[--success-soft] text-[--success] text-[10px] font-bold rounded-full uppercase">Done</span>
+                                )}
+                                {scene.status === 'generating' && (
+                                  <span className="px-2 py-0.5 bg-[--accent-soft] text-[--accent] text-[10px] font-bold rounded-full uppercase animate-pulse">Producing...</span>
+                                )}
                               </div>
+                              <p className="text-xs text-[--text-muted] truncate mt-0.5">{scene.description}</p>
                             </div>
-                            <p className="text-xs text-white/40 line-clamp-1 group-hover:line-clamp-none transition-all">{scene.description}</p>
-                            {scene.audioScript && (
-                              <div className="flex items-center gap-1.5 mt-1.5 text-[9px] text-blue-400/60 font-bold uppercase tracking-wider">
-                                <Wand2 className="w-2.5 h-2.5" />
-                                <span>Audio Script Ready</span>
-                              </div>
-                            )}
-                          </div>
 
-                          {/* Action */}
-                          <div className="shrink-0">
-                            {scene.status === 'completed' ? (
-                              <button 
-                                onClick={() => { setCurrentSceneIndex(index); setActiveTab('preview'); }}
-                                className="w-10 h-10 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all"
-                              >
-                                <Play className="w-4 h-4 fill-current" />
+                            {/* Actions */}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {scene.status === 'completed' && (
+                                <>
+                                  {!scene.approved && (
+                                    <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                      onClick={() => approveScene(scene.id)} title="Approve scene to enable next scene production"
+                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[--success] hover:bg-emerald-400 text-black rounded-lg text-xs font-bold transition-all animate-pulse">
+                                      <Check className="w-3.5 h-3.5" /> Approve
+                                    </motion.button>
+                                  )}
+                                  <button onClick={() => { setCurrentSceneIndex(index); setWizardStep('preview'); }} title="Preview"
+                                    className="p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-all">
+                                    <Play className="w-4 h-4 fill-current" />
+                                  </button>
+                                  <button onClick={() => downloadSceneVideo(scene)} title="Download"
+                                    className="p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-all">
+                                    <Download className="w-4 h-4" />
+                                  </button>
+                                </>
+                              )}
+                              {scene.status === 'pending' && (
+                                <button onClick={() => generateVideoForScene(index)}
+                                  disabled={isProcessingVideo || !isApiKeySelected || !canProduceScene(index)}
+                                  title={!canProduceScene(index) ? `Approve Scene ${index} first` : 'Produce this scene'}
+                                  className="px-3 py-1.5 bg-white text-black hover:bg-white/90 disabled:opacity-20 disabled:cursor-not-allowed rounded-lg text-xs font-bold transition-all">
+                                  Produce
+                                </button>
+                              )}
+                              {scene.status === 'generating' && <Loader2 className="w-5 h-5 text-[--accent] animate-spin" />}
+                              {scene.status === 'failed' && (
+                                <button onClick={() => generateVideoForScene(index)}
+                                  disabled={isProcessingVideo || !canProduceScene(index)}
+                                  className="px-3 py-1.5 bg-[--danger-soft] text-[--danger] disabled:opacity-20 rounded-lg text-xs font-bold">Retry</button>
+                              )}
+                              <button onClick={() => setEditingSceneId(scene.id)} className="p-2 hover:bg-white/5 rounded-lg text-[--text-muted]">
+                                <Settings className="w-3.5 h-3.5" />
                               </button>
-                            ) : scene.status === 'generating' ? (
-                              <div className="w-10 h-10 flex items-center justify-center">
-                                <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
-                              </div>
-                            ) : (
-                              <button 
-                                onClick={() => generateVideoForScene(index)}
-                                disabled={isProcessingVideo || !isApiKeySelected}
-                                className="px-4 py-2 bg-white text-black hover:bg-white/90 disabled:opacity-30 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all"
-                              >
-                                Produce
+                              <button onClick={() => deleteScene(scene.id)} className="p-2 hover:bg-[--danger-soft] rounded-lg text-[--text-muted] hover:text-[--danger]">
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
-                            )}
+                            </div>
                           </div>
-                        </div>
+                          {/* Approval reminder */}
+                          {scene.status === 'completed' && !scene.approved && (
+                            <div className="mt-3 pt-3 border-t border-[--border-subtle] flex items-center gap-2 text-xs text-[--warning]">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                              <span>Approve this scene to unlock the next one for production</span>
+                            </div>
+                          )}
+                        </>
                       )}
                     </motion.div>
                   ))}
                 </AnimatePresence>
 
-                {!script && !isGeneratingScript && (
-                  <div className="h-64 flex flex-col items-center justify-center border border-dashed border-white/10 rounded-[3rem] text-white/10 bg-white/[0.01]">
-                    <Clapperboard className="w-12 h-12 mb-4 opacity-10" />
-                    <p className="text-xs font-bold uppercase tracking-[0.2em]">Timeline Empty</p>
+                {/* Empty State */}
+                {(!script || script.scenes.length === 0) && !isGeneratingScript && (
+                  <div className="h-48 flex flex-col items-center justify-center border border-dashed border-[--border-subtle] rounded-2xl text-[--text-muted]">
+                    <Clapperboard className="w-10 h-10 mb-3 opacity-30" />
+                    <p className="text-sm font-medium">No scenes yet</p>
+                    <p className="text-xs mt-1">Go back to generate a script first</p>
+                  </div>
+                )}
+
+                {isGeneratingScript && (
+                  <div className="h-48 flex flex-col items-center justify-center">
+                    <Loader2 className="w-8 h-8 text-[--accent] animate-spin mb-4" />
+                    <p className="text-sm font-medium text-[--text-secondary]">Creating your movie script...</p>
                   </div>
                 )}
               </div>
-            </div>
-          </div>
-        </div>
+
+              {/* Navigation */}
+              <div className="flex justify-between">
+                <button onClick={() => setWizardStep('language')}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
+                  <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+                {script && script.scenes.some(s => s.status === 'completed') && (
+                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                    onClick={() => { setCurrentSceneIndex(0); setWizardStep('preview'); }}
+                    className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-blue-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20">
+                    Preview <ArrowRight className="w-4 h-4" />
+                  </motion.button>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {/* ===== STEP 5: PREVIEW ===== */}
+          {wizardStep === 'preview' && (
+            <motion.div key="preview" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-4xl mx-auto space-y-6">
+
+              {/* Video Player */}
+              <div className="aspect-video bg-black rounded-2xl sm:rounded-3xl overflow-hidden border border-[--border-subtle] relative shadow-2xl">
+                {currentSceneIndex !== null && script?.scenes[currentSceneIndex]?.videoUrl ? (
+                  <>
+                    <video ref={videoRef} src={script.scenes[currentSceneIndex].videoUrl} controls autoPlay
+                      muted={!!script.scenes[currentSceneIndex].audioUrl} className="w-full h-full object-cover" />
+                    {script.scenes[currentSceneIndex].audioUrl && (
+                      <audio ref={audioRef} src={script.scenes[currentSceneIndex].audioUrl} autoPlay controls
+                        className="absolute bottom-3 left-3 right-3 z-20 opacity-90 h-8" />
+                    )}
+                  </>
+                ) : (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-[--text-muted]">
+                    <Clapperboard className="w-12 h-12 mb-4 opacity-20" />
+                    <p className="text-sm font-medium">Select a scene to preview</p>
+                  </div>
+                )}
+
+                {/* Loading Overlay */}
+                <AnimatePresence>
+                  {isProcessingVideo && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                      className="absolute inset-0 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center z-30">
+                      <Loader2 className="w-12 h-12 text-[--accent] animate-spin mb-4" />
+                      <p className="text-lg font-bold">Rendering...</p>
+                      <p className="text-xs text-[--text-muted] mt-1">Scene {currentSceneIndex !== null ? currentSceneIndex + 1 : ''}</p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* Scene Info */}
+              {script && currentSceneIndex !== null && script.scenes[currentSceneIndex] && (
+                <div className="p-5 bg-[--bg-card] border border-[--border-subtle] rounded-2xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-[--accent] bg-[--accent-soft] px-2 py-1 rounded-md">Scene {currentSceneIndex + 1}</span>
+                      <h3 className="font-bold">{script.scenes[currentSceneIndex].title}</h3>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {script.scenes[currentSceneIndex].status === 'completed' && !script.scenes[currentSceneIndex].approved && (
+                        <button onClick={() => approveScene(script.scenes[currentSceneIndex].id)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-[--success] text-black rounded-lg text-xs font-bold">
+                          <Check className="w-3.5 h-3.5" /> Approve
+                        </button>
+                      )}
+                      {script.scenes[currentSceneIndex].videoUrl && (
+                        <button onClick={() => downloadSceneVideo(script.scenes[currentSceneIndex])}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-[--bg-card-hover] border border-[--border-subtle] rounded-lg text-xs font-medium">
+                          <Download className="w-3.5 h-3.5" /> Download
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-sm text-[--text-secondary] leading-relaxed">{script.scenes[currentSceneIndex].description}</p>
+                </div>
+              )}
+
+              {/* Scene Strip */}
+              {script && (
+                <div className="flex gap-2 overflow-x-auto pb-2">
+                  {script.scenes.map((scene, i) => (
+                    <button key={scene.id} onClick={() => setCurrentSceneIndex(i)}
+                      className={cn(
+                        "shrink-0 w-20 sm:w-24 p-2 rounded-xl border text-center transition-all",
+                        currentSceneIndex === i ? "bg-[--bg-card-active] border-[--accent]/40" : "bg-[--bg-card] border-[--border-subtle] hover:bg-[--bg-card-hover]"
+                      )}>
+                      <div className={cn("w-full aspect-video rounded-lg mb-1.5 flex items-center justify-center text-xs",
+                        scene.status === 'completed' ? "bg-[--success-soft] text-[--success]" : "bg-white/5 text-[--text-muted]"
+                      )}>
+                        {scene.status === 'completed' ? <CheckCircle2 className="w-3.5 h-3.5" /> : i + 1}
+                      </div>
+                      <p className="text-[10px] font-medium text-[--text-muted] truncate">{scene.title}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Export Movie Section */}
+              {script && script.scenes.some(s => s.status === 'completed' && s.videoUrl) && (
+                <div className="p-5 bg-[--bg-card] border border-[--border-subtle] rounded-2xl space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Film className="w-5 h-5 text-[--accent]" />
+                      <h3 className="font-bold text-sm">Export Full Movie</h3>
+                    </div>
+                    {!showExportDialog && (
+                      <button onClick={() => { setShowExportDialog(true); setExportStatus('idle'); setExportLanguage(selectedLanguages[0] || 'he'); }}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-[--accent] to-purple-500 text-white rounded-xl text-sm font-bold shadow-lg hover:shadow-xl transition-all hover:scale-[1.02]">
+                        <Download className="w-4 h-4" /> Export Movie 🎬
+                      </button>
+                    )}
+                  </div>
+
+                  <AnimatePresence>
+                    {showExportDialog && (
+                      <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                        className="space-y-4 overflow-hidden">
+
+                        {/* Language Selector */}
+                        {exportStatus === 'idle' && (
+                          <div className="space-y-2">
+                            <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Audio Language</label>
+                            <div className="flex gap-2">
+                              {selectedLanguages.map(lang => (
+                                <button key={lang} onClick={() => setExportLanguage(lang)}
+                                  className={cn(
+                                    "flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all",
+                                    exportLanguage === lang
+                                      ? "bg-[--accent-soft] border-[--accent]/40 text-[--accent]"
+                                      : "bg-[--bg-card-hover] border-[--border-subtle] text-[--text-secondary] hover:bg-[--bg-card-active]"
+                                  )}>
+                                  <span>{LANGUAGE_CONFIG[lang].flag}</span>
+                                  <span>{LANGUAGE_CONFIG[lang].label}</span>
+                                </button>
+                              ))}
+                            </div>
+                            <p className="text-xs text-[--text-muted]">
+                              {script.scenes.filter(s => s.status === 'completed').length} scenes will be merged into one MP4 file
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Progress */}
+                        {(exportStatus === 'loading-ffmpeg' || exportStatus === 'processing') && (
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-3">
+                              <Loader2 className="w-5 h-5 text-[--accent] animate-spin shrink-0" />
+                              <div className="flex-1">
+                                <p className="text-sm font-medium">{exportProgressMsg}</p>
+                                <div className="mt-2 w-full bg-white/10 rounded-full h-2 overflow-hidden">
+                                  <motion.div className="h-full bg-gradient-to-r from-[--accent] to-purple-500 rounded-full"
+                                    initial={{ width: 0 }} animate={{ width: `${exportProgress}%` }} transition={{ duration: 0.3 }} />
+                                </div>
+                                <p className="text-xs text-[--text-muted] mt-1">{exportProgress}%</p>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Done */}
+                        {exportStatus === 'done' && exportUrl && (
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-2 text-[--success]">
+                              <CheckCircle2 className="w-5 h-5" />
+                              <p className="text-sm font-bold">Movie exported successfully!</p>
+                            </div>
+                            <button onClick={downloadExportedMovie}
+                              className="flex items-center gap-2 px-5 py-3 bg-[--success] text-black rounded-xl text-sm font-bold w-full justify-center hover:brightness-110 transition-all">
+                              <Download className="w-4 h-4" /> Download MP4
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Error */}
+                        {exportStatus === 'error' && (
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-2 text-red-400">
+                              <AlertCircle className="w-5 h-5" />
+                              <p className="text-sm font-medium">{exportProgressMsg}</p>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Action Buttons */}
+                        <div className="flex items-center gap-3">
+                          {exportStatus === 'idle' && (
+                            <button onClick={exportMovie}
+                              className="flex items-center gap-2 px-5 py-2.5 bg-[--accent] text-white rounded-xl text-sm font-bold hover:brightness-110 transition-all">
+                              <Play className="w-4 h-4" /> Start Export
+                            </button>
+                          )}
+                          {(exportStatus === 'error' || exportStatus === 'done') && (
+                            <button onClick={() => { setExportStatus('idle'); setExportProgress(0); setExportProgressMsg(''); }}
+                              className="flex items-center gap-2 px-4 py-2 bg-[--bg-card-hover] border border-[--border-subtle] rounded-xl text-sm font-medium hover:bg-[--bg-card-active] transition-all">
+                              Export Again
+                            </button>
+                          )}
+                          <button onClick={() => { setShowExportDialog(false); setExportStatus('idle'); }}
+                            className="flex items-center gap-2 px-4 py-2 text-[--text-muted] text-sm hover:text-[--text-secondary] transition-all">
+                            <X className="w-3.5 h-3.5" /> Cancel
+                          </button>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              )}
+
+              {/* Navigation */}
+              <div className="flex justify-start">
+                <button onClick={() => setWizardStep('timeline')}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
+                  <ArrowLeft className="w-4 h-4" /> Timeline
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+        </AnimatePresence>
       </main>
 
-      {/* Mobile Navigation Bar */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[90%] max-w-md bg-black/60 backdrop-blur-2xl border border-white/10 rounded-full p-2 flex items-center justify-between md:hidden z-[60] shadow-2xl ring-1 ring-white/5">
-        {(['script', 'timeline', 'preview'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={cn(
-              "flex-1 py-3 rounded-full flex flex-col items-center gap-1 transition-all",
-              activeTab === tab ? "bg-white text-black shadow-lg" : "text-white/40"
-            )}
-          >
-            {tab === 'script' && <Wand2 className="w-4 h-4" />}
-            {tab === 'timeline' && <Clock className="w-4 h-4" />}
-            {tab === 'preview' && <Play className="w-4 h-4" />}
-            <span className="text-[8px] font-black uppercase tracking-tighter">{tab}</span>
-          </button>
-        ))}
+      {/* Mobile Bottom Navigation */}
+      <div className="fixed bottom-0 left-0 right-0 bg-[--bg-elevated]/90 backdrop-blur-xl border-t border-[--border-subtle] p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:hidden z-50">
+        <div className="flex items-center justify-around">
+          {WIZARD_STEPS.map((step) => (
+            <button key={step.key} onClick={() => setWizardStep(step.key)}
+              className={cn(
+                "flex flex-col items-center gap-1 py-1.5 px-3 rounded-xl transition-all min-w-[56px]",
+                wizardStep === step.key ? "text-[--accent]" : "text-[--text-muted]"
+              )}>
+              {step.icon}
+              <span className="text-[10px] font-semibold">{step.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
-
-      <style dangerouslySetInnerHTML={{ __html: `
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.05);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.1);
-        }
-        @keyframes pulse-slow {
-          0%, 100% { opacity: 0.3; }
-          50% { opacity: 0.6; }
-        }
-      `}} />
     </div>
   );
 }
