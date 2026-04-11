@@ -53,3 +53,17 @@ export const COST_PER_SCENE = {
 } as const;
 
 export const SCENE_COST = COST_PER_SCENE.veo + COST_PER_SCENE.tts + COST_PER_SCENE.translation + COST_PER_SCENE.script; // ~$0.108 per scene
+
+// Calculate scene estimates based on word count
+// Hebrew: ~3 words per second of narration, 8s per scene = ~24 words per scene of narration
+// But scenes also have visual-only moments, so roughly 1 scene per 30-50 words of source text
+export const estimateScenes = (wordCount: number): { short: number; medium: number; long: number } => {
+  if (wordCount === 0) return { short: 0, medium: 0, long: 0 };
+  // Base: ~1 scene per 40 words for medium density
+  const base = Math.max(5, Math.round(wordCount / 40));
+  return {
+    short: Math.max(5, Math.round(base * 0.5)),
+    medium: base,
+    long: Math.min(60, Math.round(base * 1.5)),
+  };
+};

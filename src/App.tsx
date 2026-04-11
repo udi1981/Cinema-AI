@@ -28,16 +28,16 @@ import { GoogleGenAI, Modality, VideoGenerationReferenceType } from "@google/gen
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { cn } from './lib/utils';
-import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardStep, ExportStatus, MovieLength, SCENE_COST, COST_PER_SCENE } from './types';
+import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardStep, ExportStatus, MovieLength, SCENE_COST, COST_PER_SCENE, estimateScenes } from './types';
 
 // Constants
 const VEO_MODEL = 'veo-3.1-generate-preview';
 const SCRIPT_MODEL = 'gemini-3.1-pro-preview';
 
-const MOVIE_LENGTH_CONFIG: Record<MovieLength, { label: string; labelHe: string; scenes: string; icon: string }> = {
-  short: { label: 'Short', labelHe: 'קצר', scenes: '8-15', icon: '⚡' },
-  medium: { label: 'Medium', labelHe: 'בינוני', scenes: '15-25', icon: '🎬' },
-  long: { label: 'Long', labelHe: 'ארוך', scenes: '25-50', icon: '🎥' },
+const MOVIE_LENGTH_LABELS: Record<MovieLength, { labelHe: string; icon: string; desc: string }> = {
+  short: { labelHe: 'קצר', icon: '⚡', desc: 'תמצית — רק אירועים מרכזיים' },
+  medium: { labelHe: 'בינוני', icon: '🎬', desc: 'מאוזן — כל הסצנות החשובות' },
+  long: { labelHe: 'ארוך', icon: '🎥', desc: 'מפורט — כל פרט בסיפור' },
 };
 
 const LANGUAGE_CONFIG: Record<AudioLanguage, { label: string; flag: string; voice: string; ttsLang: string }> = {
@@ -296,13 +296,14 @@ You MUST output a "characterDescriptions" field — a single English paragraph d
 ${characterImageDescription ? `\n=== REFERENCE IMAGE CHARACTER ANALYSIS (USE THIS EXACTLY) ===\nThe following description was generated from the user's uploaded reference photos. This is the GROUND TRUTH for the character's appearance. Copy this description WORD FOR WORD into your "characterDescriptions" field and into EVERY "visualPrompt":\n${characterImageDescription}\n` : ''}
 EVERY "visualPrompt" MUST begin with the FULL character description, word-for-word. The character MUST look IDENTICAL in every single scene — same face, same hair, same clothing, same skin tone. ANY deviation is a critical failure. This ensures the AI video generator renders the SAME character in every scene.
 
-=== SCENE GRANULARITY (USER SELECTED: ${movieLength.toUpperCase()}) ===
-Each scene = one 8-second video clip. The user chose "${movieLength}" movie length.
-Target scene count: ${MOVIE_LENGTH_CONFIG[movieLength].scenes} scenes.
+=== SCENE GRANULARITY ===
+Each scene = one 8-second video clip. The user chose "${movieLength}" density.
+The source text has approximately ${prompt.split(/\s+/).filter(Boolean).length} words.
+Target scene count: approximately ${estimateScenes(prompt.split(/\s+/).filter(Boolean).length)[movieLength]} scenes.
 
-${movieLength === 'short' ? 'COMPACT MODE: Group multiple story beats into cohesive scenes. Prioritize the most important events and key dialogue. Skip minor transitions and descriptions. Aim for 8-15 scenes maximum.' : movieLength === 'medium' ? 'BALANCED MODE: Cover all major story events and key dialogue. Group minor transitions together. Aim for 15-25 scenes. Skip only truly trivial details.' : 'COMPREHENSIVE MODE: Cover the entire story in detail. Every meaningful event, dialogue, and transition gets its own scene. Aim for 25-50 scenes.'}
+${movieLength === 'short' ? 'COMPACT MODE: Group multiple story beats into cohesive scenes. Prioritize the most important events and key dialogue. Skip minor transitions and descriptions.' : movieLength === 'medium' ? 'BALANCED MODE: Cover all major story events and key dialogue. Group minor transitions together. Skip only truly trivial details.' : 'COMPREHENSIVE MODE: Cover the entire story in detail. Every meaningful event, dialogue, and transition gets its own scene.'}
 
-CRITICAL RULE: The ENTIRE story arc must be covered — beginning, middle, and end. Do NOT stop partway through. Do NOT skip the ending. Adapt scene density to fit within the target range while covering the full story.
+CRITICAL RULE: The ENTIRE story arc must be covered — beginning, middle, and end. Do NOT stop partway through. Do NOT skip the ending. Stay close to the target scene count.
 
 === AUDIO DURATION MATCHING (CRITICAL) ===
 Video clips are 5-8 seconds long. The audioScript MUST fit within this time. Calculate: ~2.5 Hebrew words per second for natural speech.
@@ -338,7 +339,7 @@ Return a JSON object:
         contents: {
           parts: [
             ...imageParts,
-            { text: `Break down this ENTIRE text into detailed cinematic scenes — cover the full story from beginning to end. Each scene is an 8-second video clip. Target ${MOVIE_LENGTH_CONFIG[movieLength].scenes} scenes total (user chose "${movieLength}" length). ${movieLength === 'short' ? 'Be concise — group related events, focus on key moments.' : movieLength === 'medium' ? 'Balance detail with pacing — cover all key events.' : 'Be comprehensive — give each event its own scene.'} Ensure SEAMLESS visual transitions between consecutive scenes — no jump cuts, no sudden changes. Hebrew dialogue and narration in audioScript, English visual prompts. Source text:\n\n${prompt}` }
+            { text: `Break down this ENTIRE text into detailed cinematic scenes — cover the full story from beginning to end. Each scene is an 8-second video clip. Target approximately ${estimateScenes(prompt.split(/\s+/).filter(Boolean).length)[movieLength]} scenes (user chose "${movieLength}" density). ${movieLength === 'short' ? 'Be concise — group related events, focus on key moments.' : movieLength === 'medium' ? 'Balance detail with pacing — cover all key events.' : 'Be comprehensive — give each event its own scene.'} Ensure SEAMLESS visual transitions between consecutive scenes — no jump cuts, no sudden changes. Hebrew dialogue and narration in audioScript, English visual prompts. Source text:\n\n${prompt}` }
           ]
         },
         config: {
@@ -1072,29 +1073,40 @@ Return a JSON object:
               </div>
 
               {/* Movie Length */}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider text-center block">Movie Length</label>
-                <div className="flex items-center justify-center gap-2">
-                  {(Object.entries(MOVIE_LENGTH_CONFIG) as [MovieLength, typeof MOVIE_LENGTH_CONFIG['short']][]).map(([key, config]) => (
-                    <button key={key} onClick={() => setMovieLength(key)}
-                      className={cn(
-                        "flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all",
-                        movieLength === key
-                          ? "bg-[--accent-soft] border-[--accent]/40 text-[--accent]"
-                          : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
-                      )}>
-                      <span>{config.icon}</span>
-                      <div className="text-left">
-                        <span className="block text-xs font-bold">{config.labelHe}</span>
-                        <span className="block text-[10px] opacity-70">{config.scenes} scenes</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[10px] text-[--text-muted] text-center">
-                  Est. cost: ~${(parseInt(MOVIE_LENGTH_CONFIG[movieLength].scenes.split('-')[1]) * SCENE_COST).toFixed(2)} USD
-                </p>
-              </div>
+              {(() => {
+                const wordCount = prompt.split(/\s+/).filter(Boolean).length;
+                const est = estimateScenes(wordCount);
+                const selectedScenes = est[movieLength];
+                return (
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider text-center block">Movie Length</label>
+                    <div className="flex items-center justify-center gap-2">
+                      {(Object.entries(MOVIE_LENGTH_LABELS) as [MovieLength, typeof MOVIE_LENGTH_LABELS['short']][]).map(([key, config]) => (
+                        <button key={key} onClick={() => setMovieLength(key)}
+                          className={cn(
+                            "flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all",
+                            movieLength === key
+                              ? "bg-[--accent-soft] border-[--accent]/40 text-[--accent]"
+                              : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
+                          )}>
+                          <span>{config.icon}</span>
+                          <div className="text-left">
+                            <span className="block text-xs font-bold">{config.labelHe}</span>
+                            <span className="block text-[10px] opacity-70">
+                              {wordCount > 0 ? `~${est[key]} scenes` : config.desc}
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                    {wordCount > 0 && (
+                      <p className="text-[10px] text-[--text-muted] text-center">
+                        {wordCount} words → ~{selectedScenes} scenes → Est. ~${(selectedScenes * SCENE_COST).toFixed(2)} USD
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Textarea */}
               <div className="relative group">
