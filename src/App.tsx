@@ -721,41 +721,31 @@ Return a JSON object:
         const maxDuration = 8; // Veo max duration
         const basePrompt = `Read this ${langConfig.ttsLang} text aloud with cinematic narration style, at a brisk pace with short pauses${emotionalContext ? `, with these emotions: ${emotionalContext}` : ''}`;
 
-        // Single TTS call — instruct fast pace upfront to save API quota
-        let pcmBytes = await generateTTS(`${basePrompt}. Keep the total duration under ${maxDuration} seconds:\n${cleanTtsText}`);
+        // Generate TTS — try fast pace first, retry faster if too long
+        const byteRate = 24000 * 1 * (16 / 8); // sampleRate * channels * bytesPerSample
+        let pcmBytes = await generateTTS(`${basePrompt}. Keep total duration under ${maxDuration} seconds. Speak at a brisk, energetic pace:\n${cleanTtsText}`);
+
         if (pcmBytes) {
-          const byteRate = 24000 * 1 * (16 / 8); // sampleRate * channels * bytesPerSample
-          const rawDuration = pcmBytes.length / byteRate;
+          let rawDuration = pcmBytes.length / byteRate;
           console.log(`TTS scene ${index + 1}: ${rawDuration.toFixed(1)}s`);
 
-          // If too long, smart-trim at silence boundary (no extra API calls)
-          if (rawDuration > maxDuration) {
-            const maxBytes = Math.floor(maxDuration * byteRate);
-            const searchStart = Math.max(0, maxBytes - byteRate * 2); // search in last 2 seconds before cutoff
-            let bestCutPoint = maxBytes;
-            let lowestEnergy = Infinity;
-
-            // Scan in 100ms windows to find quietest point (natural pause between words/sentences)
-            const windowSize = Math.floor(0.1 * byteRate);
-            for (let pos = searchStart; pos < maxBytes - windowSize; pos += Math.floor(0.05 * byteRate)) {
-              let energy = 0;
-              for (let j = pos; j < pos + windowSize; j += 2) {
-                const sample = (pcmBytes[j] | (pcmBytes[j + 1] << 8));
-                const signed = sample > 32767 ? sample - 65536 : sample;
-                energy += Math.abs(signed);
-              }
-              if (energy < lowestEnergy) {
-                lowestEnergy = energy;
-                bestCutPoint = pos + windowSize;
+          // If too long (>8.5s), retry with much faster pace instruction
+          if (rawDuration > maxDuration + 0.5) {
+            console.warn(`TTS scene ${index + 1}: ${rawDuration.toFixed(1)}s too long, retrying with faster pace...`);
+            const fasterPcm = await generateTTS(`${basePrompt}. CRITICAL: You MUST finish in under ${maxDuration} seconds. Speak VERY fast, rapid-fire narration pace. Do NOT pause between sentences:\n${cleanTtsText}`);
+            if (fasterPcm) {
+              const fasterDuration = fasterPcm.length / byteRate;
+              console.log(`TTS scene ${index + 1} faster retry: ${fasterDuration.toFixed(1)}s`);
+              // Use the faster version if it's shorter
+              if (fasterDuration < rawDuration) {
+                pcmBytes = fasterPcm;
+                rawDuration = fasterDuration;
               }
             }
-
-            // Align to sample boundary (2 bytes per sample)
-            bestCutPoint = bestCutPoint - (bestCutPoint % 2);
-            pcmBytes = pcmBytes.slice(0, bestCutPoint);
-            console.warn(`TTS scene ${index + 1}: smart-trimmed from ${rawDuration.toFixed(1)}s to ${(pcmBytes.length / byteRate).toFixed(1)}s at silence boundary`);
           }
 
+          // NEVER cut audio mid-sentence. If still too long, keep full audio —
+          // video will be 8s max but audio plays completely over last frame
           const wav = pcmToWav(pcmBytes);
           audioUrl = wav.url;
           (scene as any)._audioDuration = wav.duration;
@@ -841,9 +831,9 @@ Return a JSON object:
         referenceImagesPayload.push({ image: { imageBytes: referenceImages[i].data, mimeType: referenceImages[i].mimeType }, referenceType: VideoGenerationReferenceType.STYLE });
       }
 
-      // Always use 8s (Veo max) so video is never shorter than audio
+      // Match video duration to audio — min 5s, max 8s (Veo limits)
       const audioDur = (scene as any)._audioDuration as number | undefined;
-      const targetDuration = 8;
+      const targetDuration = audioDur ? Math.min(8, Math.max(5, Math.ceil(audioDur))) : 8;
       console.log(`Video scene ${index + 1}: generating ${targetDuration}s video (audio was ${audioDur?.toFixed(1) || 'none'}s)`);
 
       const videoConfig: any = {
@@ -1127,13 +1117,13 @@ Return a JSON object:
           const audioBlob = await fetch(audioUrl).then(r => r.blob());
           await ffmpeg.writeFile(`scene_${sceneNum}.wav`, await fetchFile(audioBlob));
 
-          // Mux video + audio → MP4
+          // Mux video + audio → MP4 (do NOT use -shortest — let full audio play,
+          // video's last frame will freeze if audio is longer)
           await ffmpeg.exec([
             '-i', `scene_${sceneNum}.webm`,
             '-i', `scene_${sceneNum}.wav`,
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
-            '-shortest',
             '-movflags', '+faststart',
             `clip_${sceneNum}.mp4`
           ]);
