@@ -92,9 +92,45 @@ export default function App() {
   const scriptRef = useRef<MovieScript | null>(null);
 
   // Keep ref in sync with state so async functions always see latest script
+  // Also persist script to localStorage (without video/audio blobs)
   useEffect(() => {
     scriptRef.current = script;
+    if (script) {
+      try {
+        const toSave = {
+          ...script,
+          scenes: script.scenes.map(s => ({
+            ...s,
+            // Don't save blob URLs — they expire on refresh
+            videoUrl: undefined,
+            audioUrls: undefined,
+          })),
+        };
+        localStorage.setItem('cinema_script', JSON.stringify(toSave));
+      } catch (e) { /* storage full, ignore */ }
+    } else {
+      localStorage.removeItem('cinema_script');
+    }
   }, [script]);
+
+  // Restore script from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('cinema_script');
+      if (saved && !script) {
+        const parsed = JSON.parse(saved) as MovieScript;
+        // Reset video statuses — blobs are gone after refresh
+        parsed.scenes = parsed.scenes.map(s => ({
+          ...s,
+          status: s.status === 'generating' ? 'pending' : s.status === 'completed' && !s.videoUrl ? 'pending' : s.status,
+          videoUrl: undefined,
+          audioUrls: undefined,
+        }));
+        setScript(parsed);
+        setWizardStep('timeline');
+      }
+    } catch (e) { /* corrupt data, ignore */ }
+  }, []);
 
   // Sync audio with video
   useEffect(() => {
@@ -452,8 +488,8 @@ Return a JSON object:
     // In batch mode, skip the isProcessingVideo guard (we manage it ourselves)
     if (!latestScript || !isApiKeySelected || (!_batchMode && isProcessingVideo)) return;
 
-    // Use more aggressive retry for video generation
-    const videoWithRetry = (fn: any) => withRetry(fn, 7, 8000);
+    // Light retry for video — don't burn quota on repeated 429s
+    const videoWithRetry = (fn: any) => withRetry(fn, 2, 10000);
 
     const scene = latestScript.scenes[index];
     const updatedScenes = latestScript.scenes.map((s, i) =>
@@ -709,7 +745,7 @@ Return a JSON object:
         setIsApiKeySelected(false);
         errorMessage = "API Key session expired. Please select your key again.";
       } else if (errorMessage.includes("429") || errorMessage.includes("RESOURCE_EXHAUSTED") || errorMessage.toLowerCase().includes("quota")) {
-        errorMessage = "API Quota Exceeded. You've reached the limit for video generation. Please wait a few minutes or check your Gemini API billing plan (https://ai.google.dev/gemini-api/docs/rate-limits).";
+        errorMessage = "⚠️ Quota exhausted — Free Tier allows only a few Veo requests per day. Switch to a new API key (Key button) or try again tomorrow. Your script is saved!";
       } else {
         // Try to parse JSON error if it's a stringified object
         try {
