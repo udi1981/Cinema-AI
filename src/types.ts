@@ -41,3 +41,15 @@ export type AudioLanguage = 'he' | 'en' | 'zh';
 export type WizardStep = 'story' | 'style' | 'language' | 'timeline' | 'preview';
 
 export type ExportStatus = 'idle' | 'loading-ffmpeg' | 'processing' | 'done' | 'error';
+
+export type MovieLength = 'short' | 'medium' | 'long';
+
+// Google AI Studio pricing (approximate USD)
+export const COST_PER_SCENE = {
+  veo: 0.10,        // Veo 3.1 video generation ~$0.10/scene (8s clip, free tier estimate)
+  tts: 0.002,       // Gemini Flash TTS ~$0.002/scene
+  translation: 0.001, // Gemini Flash translation ~$0.001/scene
+  script: 0.005,     // Gemini Pro script gen (amortized per scene)
+} as const;
+
+export const SCENE_COST = COST_PER_SCENE.veo + COST_PER_SCENE.tts + COST_PER_SCENE.translation + COST_PER_SCENE.script; // ~$0.108 per scene

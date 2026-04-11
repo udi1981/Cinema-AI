@@ -20,17 +20,25 @@ import {
   Check,
   ArrowRight,
   ArrowLeft,
+  DollarSign,
+  Coins,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Modality, VideoGenerationReferenceType } from "@google/genai";
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { cn } from './lib/utils';
-import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardStep, ExportStatus } from './types';
+import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardStep, ExportStatus, MovieLength, SCENE_COST, COST_PER_SCENE } from './types';
 
 // Constants
 const VEO_MODEL = 'veo-3.1-generate-preview';
 const SCRIPT_MODEL = 'gemini-3.1-pro-preview';
+
+const MOVIE_LENGTH_CONFIG: Record<MovieLength, { label: string; labelHe: string; scenes: string; icon: string }> = {
+  short: { label: 'Short', labelHe: 'קצר', scenes: '8-15', icon: '⚡' },
+  medium: { label: 'Medium', labelHe: 'בינוני', scenes: '15-25', icon: '🎬' },
+  long: { label: 'Long', labelHe: 'ארוך', scenes: '25-50', icon: '🎥' },
+};
 
 const LANGUAGE_CONFIG: Record<AudioLanguage, { label: string; flag: string; voice: string; ttsLang: string }> = {
   he: { label: 'עברית', flag: '🇮🇱', voice: 'Enceladus', ttsLang: 'Hebrew' },
@@ -57,6 +65,8 @@ export default function App() {
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
   const [audioLanguage, setAudioLanguage] = useState<AudioLanguage>('he');
   const [characterImageDescription, setCharacterImageDescription] = useState('');
+  const [movieLength, setMovieLength] = useState<MovieLength>('medium');
+  const [totalSpent, setTotalSpent] = useState(0); // Total USD spent this session
   // Export state
   const [exportStatus, setExportStatus] = useState<ExportStatus>('idle');
   const [exportProgress, setExportProgress] = useState(0);
@@ -286,16 +296,13 @@ You MUST output a "characterDescriptions" field — a single English paragraph d
 ${characterImageDescription ? `\n=== REFERENCE IMAGE CHARACTER ANALYSIS (USE THIS EXACTLY) ===\nThe following description was generated from the user's uploaded reference photos. This is the GROUND TRUTH for the character's appearance. Copy this description WORD FOR WORD into your "characterDescriptions" field and into EVERY "visualPrompt":\n${characterImageDescription}\n` : ''}
 EVERY "visualPrompt" MUST begin with the FULL character description, word-for-word. The character MUST look IDENTICAL in every single scene — same face, same hair, same clothing, same skin tone. ANY deviation is a critical failure. This ensures the AI video generator renders the SAME character in every scene.
 
-=== SCENE GRANULARITY (DYNAMIC — BASED ON STORY LENGTH) ===
-Each scene = one 8-second video clip. Calculate the NUMBER OF SCENES based on the source text length:
-- Short text (under 500 words): 8-15 scenes
-- Medium text (500-1500 words): 15-30 scenes
-- Long text (1500-3000 words): 30-50 scenes
-- Very long text (3000+ words): 50-80+ scenes
+=== SCENE GRANULARITY (USER SELECTED: ${movieLength.toUpperCase()}) ===
+Each scene = one 8-second video clip. The user chose "${movieLength}" movie length.
+Target scene count: ${MOVIE_LENGTH_CONFIG[movieLength].scenes} scenes.
 
-CRITICAL RULE: The ENTIRE source text MUST be covered — from the very first sentence to the very last sentence. Do NOT stop partway through. Do NOT skip, compress, or summarize any part of the story. If the source has 40 paragraphs, you need enough scenes to cover ALL 40 paragraphs. Count the story events and make sure EACH ONE has a dedicated scene.
+${movieLength === 'short' ? 'COMPACT MODE: Group multiple story beats into cohesive scenes. Prioritize the most important events and key dialogue. Skip minor transitions and descriptions. Aim for 8-15 scenes maximum.' : movieLength === 'medium' ? 'BALANCED MODE: Cover all major story events and key dialogue. Group minor transitions together. Aim for 15-25 scenes. Skip only truly trivial details.' : 'COMPREHENSIVE MODE: Cover the entire story in detail. Every meaningful event, dialogue, and transition gets its own scene. Aim for 25-50 scenes.'}
 
-Each scene = one meaningful story beat. Group related small actions into a single scene ONLY if they happen in the same location with the same emotional beat. But NEVER skip dialogue or key events — include everything. When in doubt, create MORE scenes rather than fewer.
+CRITICAL RULE: The ENTIRE story arc must be covered — beginning, middle, and end. Do NOT stop partway through. Do NOT skip the ending. Adapt scene density to fit within the target range while covering the full story.
 
 === AUDIO DURATION MATCHING (CRITICAL) ===
 Video clips are 5-8 seconds long. The audioScript MUST fit within this time. Calculate: ~2.5 Hebrew words per second for natural speech.
@@ -331,7 +338,7 @@ Return a JSON object:
         contents: {
           parts: [
             ...imageParts,
-            { text: `Break down this ENTIRE text into detailed cinematic scenes — from the very first word to the very last word. Do NOT stop in the middle or skip any part. Each scene is an 8-second video clip. Create as many scenes as needed to cover the FULL story (for long texts this means 30-60+ scenes). Group related small actions into cohesive scenes, but NEVER skip dialogue, events, or story beats. Ensure SEAMLESS visual transitions between consecutive scenes — no jump cuts, no sudden changes. Hebrew dialogue and narration in audioScript, English visual prompts. Source text:\n\n${prompt}` }
+            { text: `Break down this ENTIRE text into detailed cinematic scenes — cover the full story from beginning to end. Each scene is an 8-second video clip. Target ${MOVIE_LENGTH_CONFIG[movieLength].scenes} scenes total (user chose "${movieLength}" length). ${movieLength === 'short' ? 'Be concise — group related events, focus on key moments.' : movieLength === 'medium' ? 'Balance detail with pacing — cover all key events.' : 'Be comprehensive — give each event its own scene.'} Ensure SEAMLESS visual transitions between consecutive scenes — no jump cuts, no sudden changes. Hebrew dialogue and narration in audioScript, English visual prompts. Source text:\n\n${prompt}` }
           ]
         },
         config: {
@@ -565,18 +572,12 @@ Return a JSON object:
       // 2. Generate Video
       let operation;
       
-      // Prepare reference images payload — send each image as BOTH ASSET (character) and STYLE (visual style)
-      // This locks both the character appearance AND the visual aesthetic from scene 1
-      const referenceImagesPayload = referenceImages.flatMap(img => [
-        {
-          image: { imageBytes: img.data, mimeType: img.mimeType },
-          referenceType: VideoGenerationReferenceType.ASSET
-        },
-        {
-          image: { imageBytes: img.data, mimeType: img.mimeType },
-          referenceType: VideoGenerationReferenceType.STYLE
-        },
-      ]);
+      // Prepare reference images payload — Veo allows max 3 reference images total
+      // Use first image as ASSET (character lock), rest as STYLE (visual aesthetic)
+      const referenceImagesPayload = referenceImages.slice(0, 3).map((img, i) => ({
+        image: { imageBytes: img.data, mimeType: img.mimeType },
+        referenceType: i === 0 ? VideoGenerationReferenceType.ASSET : VideoGenerationReferenceType.STYLE
+      }));
 
       // Always use 8s (Veo max) so video is never shorter than audio
       const audioDur = (scene as any)._audioDuration as number | undefined;
@@ -651,6 +652,9 @@ Return a JSON object:
       };
       setScript({ ...currentScript, scenes: finalScenes });
       setCurrentSceneIndex(index);
+      // Track cost
+      const sceneCost = COST_PER_SCENE.veo + COST_PER_SCENE.tts + (audioUrl ? COST_PER_SCENE.translation : 0);
+      setTotalSpent(prev => prev + sceneCost);
     } catch (err: any) {
       console.error("Video generation failed:", err);
       const currentScript = scriptRef.current!;
@@ -1003,8 +1007,16 @@ Return a JSON object:
             ))}
           </div>
 
-          {/* Status */}
+          {/* Status & Credits */}
           <div className="flex items-center gap-2">
+            {/* Cost tracker */}
+            {script && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[--bg-card] border border-[--border-subtle] rounded-lg text-xs" title="Estimated cost this session">
+                <DollarSign className="w-3 h-3 text-[--success]" />
+                <span className="font-mono font-bold text-[--success]">${totalSpent.toFixed(2)}</span>
+                <span className="text-[--text-muted] hidden sm:inline">/ ~${(script.scenes.length * SCENE_COST).toFixed(2)} total</span>
+              </div>
+            )}
             {!isApiKeySelected && (
               <button onClick={handleOpenKeyDialog} className="px-3 py-1.5 bg-[--warning-soft] text-[--warning] border border-[--warning]/20 rounded-lg text-xs font-medium">
                 <Settings className="w-3.5 h-3.5 inline mr-1" />Connect
@@ -1057,6 +1069,31 @@ Return a JSON object:
                     isManualMode ? "bg-[--warning-soft] border-[--warning]/30 text-[--warning]" : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted]")}>
                   <Settings className="w-3.5 h-3.5" />{isManualMode ? 'Manual Mode' : 'AI Mode'}
                 </button>
+              </div>
+
+              {/* Movie Length */}
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider text-center block">Movie Length</label>
+                <div className="flex items-center justify-center gap-2">
+                  {(Object.entries(MOVIE_LENGTH_CONFIG) as [MovieLength, typeof MOVIE_LENGTH_CONFIG['short']][]).map(([key, config]) => (
+                    <button key={key} onClick={() => setMovieLength(key)}
+                      className={cn(
+                        "flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all",
+                        movieLength === key
+                          ? "bg-[--accent-soft] border-[--accent]/40 text-[--accent]"
+                          : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
+                      )}>
+                      <span>{config.icon}</span>
+                      <div className="text-left">
+                        <span className="block text-xs font-bold">{config.labelHe}</span>
+                        <span className="block text-[10px] opacity-70">{config.scenes} scenes</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-[--text-muted] text-center">
+                  Est. cost: ~${(parseInt(MOVIE_LENGTH_CONFIG[movieLength].scenes.split('-')[1]) * SCENE_COST).toFixed(2)} USD
+                </p>
               </div>
 
               {/* Textarea */}
@@ -1306,6 +1343,11 @@ Return a JSON object:
                                 )}
                               </div>
                               <p className="text-xs text-[--text-muted] truncate mt-0.5">{scene.description}</p>
+                              {scene.status === 'pending' && (
+                                <span className="text-[10px] text-[--text-muted] mt-0.5 flex items-center gap-1">
+                                  <DollarSign className="w-2.5 h-2.5" />~${SCENE_COST.toFixed(3)}
+                                </span>
+                              )}
                             </div>
 
                             {/* Actions */}
