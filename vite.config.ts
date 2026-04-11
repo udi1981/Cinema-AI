@@ -18,6 +18,8 @@ export default defineConfig(({mode}) => {
     },
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
+      // Allow access from Cloudflare Tunnel (quick tunnels use random subdomains)
+      allowedHosts: ['.trycloudflare.com'],
       // Required for FFmpeg.wasm SharedArrayBuffer support
       headers: {
         'Cross-Origin-Opener-Policy': 'same-origin',
