@@ -32,7 +32,13 @@ import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardSt
 
 // Constants
 const VEO_MODEL = 'veo-3.1-generate-preview';
-const SCRIPT_MODEL = 'gemini-3.1-pro-preview';
+
+const SCRIPT_MODELS = [
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', desc: 'Best quality (requires billing)' },
+  { id: 'gemini-2.5-pro-preview-05-06', label: 'Gemini 2.5 Pro', desc: 'Great quality' },
+  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', desc: 'Fast & free tier' },
+  { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', desc: 'Fast & free tier' },
+] as const;
 
 const MOVIE_LENGTH_LABELS: Record<MovieLength, { labelHe: string; icon: string; desc: string }> = {
   short: { labelHe: 'קצר', icon: '⚡', desc: 'תמצית — רק אירועים מרכזיים' },
@@ -66,6 +72,7 @@ export default function App() {
   const [audioLanguage, setAudioLanguage] = useState<AudioLanguage>('he');
   const [characterImageDescription, setCharacterImageDescription] = useState('');
   const [movieLength, setMovieLength] = useState<MovieLength>('medium');
+  const [scriptModel, setScriptModel] = useState<string>(SCRIPT_MODELS[0].id);
   const [totalSpent, setTotalSpent] = useState(0); // Total USD spent this session
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
@@ -360,7 +367,7 @@ Return a JSON object:
 }`;
 
       const response = await withRetry(() => ai.models.generateContent({
-        model: SCRIPT_MODEL,
+        model: scriptModel,
         contents: {
           parts: [
             ...imageParts,
@@ -1045,8 +1052,8 @@ Return a JSON object:
             <button onClick={() => { setApiKeyDraft(customApiKey); setShowApiKeyInput(true); }}
               className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all",
                 isApiKeySelected
-                  ? "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
-                  : "bg-[--warning-soft] text-[--warning] border-[--warning]/20"
+                  ? "bg-white border-[--border-subtle] text-black"
+                  : "bg-[--warning-soft] text-black border-[--warning]/20"
               )}
               title={isApiKeySelected ? `API Key: ...${getApiKey().slice(-6)}` : 'Set API Key'}>
               <Settings className="w-3.5 h-3.5 inline mr-1" />{isApiKeySelected ? 'Key' : 'Connect'}
@@ -1133,18 +1140,35 @@ Return a JSON object:
                 <p className="text-sm text-[--text-muted]">Paste a book excerpt, script, or describe your movie idea</p>
               </div>
 
-              {/* Toggles */}
-              <div className="flex items-center justify-center gap-4">
-                <button onClick={() => setBeCreative(!beCreative)}
-                  className={cn("flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium border transition-all",
-                    beCreative ? "bg-[--accent-soft] border-[--accent]/30 text-[--accent]" : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted]")}>
-                  <Sparkles className="w-3.5 h-3.5" />{beCreative ? 'Creative Mode' : 'Strict Mode'}
-                </button>
-                <button onClick={() => setIsManualMode(!isManualMode)}
-                  className={cn("flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium border transition-all",
-                    isManualMode ? "bg-[--warning-soft] border-[--warning]/30 text-[--warning]" : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted]")}>
-                  <Settings className="w-3.5 h-3.5" />{isManualMode ? 'Manual Mode' : 'AI Mode'}
-                </button>
+              {/* Mode Selectors — dropdowns, simple style */}
+              <div className="flex items-center justify-center gap-4 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Style:</label>
+                  <select value={beCreative ? 'creative' : 'strict'} onChange={(e) => setBeCreative(e.target.value === 'creative')}
+                    className="bg-[--bg-card] border border-[--border-subtle] rounded-xl px-3 py-2 text-xs font-medium text-[--text-primary] focus:outline-none focus:border-[--accent]/40 cursor-pointer [&>option]:bg-gray-900 [&>option]:text-white">
+                    <option value="creative">✨ Creative — AI enriches with cinematic depth</option>
+                    <option value="strict">📐 Strict — follows your text word for word</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Input:</label>
+                  <select value={isManualMode ? 'manual' : 'ai'} onChange={(e) => setIsManualMode(e.target.value === 'manual')}
+                    className="bg-[--bg-card] border border-[--border-subtle] rounded-xl px-3 py-2 text-xs font-medium text-[--text-primary] focus:outline-none focus:border-[--accent]/40 cursor-pointer [&>option]:bg-gray-900 [&>option]:text-white">
+                    <option value="ai">🤖 AI — describe an idea, AI builds the script</option>
+                    <option value="manual">📖 Text — paste a book/script, AI splits to scenes</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Script Model Selector — also simple dropdown */}
+              <div className="flex items-center justify-center gap-2">
+                <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Model:</label>
+                <select value={scriptModel} onChange={(e) => setScriptModel(e.target.value)}
+                  className="bg-[--bg-card] border border-[--border-subtle] rounded-xl px-3 py-2 text-xs font-medium text-[--text-primary] focus:outline-none focus:border-[--accent]/40 cursor-pointer [&>option]:bg-gray-900 [&>option]:text-white">
+                  {SCRIPT_MODELS.map(m => (
+                    <option key={m.id} value={m.id}>{m.label} — {m.desc}</option>
+                  ))}
+                </select>
               </div>
 
               {/* Movie Length */}
@@ -1159,9 +1183,9 @@ Return a JSON object:
                       {(Object.entries(MOVIE_LENGTH_LABELS) as [MovieLength, typeof MOVIE_LENGTH_LABELS['short']][]).map(([key, config]) => (
                         <button key={key} onClick={() => setMovieLength(key)}
                           className={cn(
-                            "flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all",
+                            "flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 text-sm font-medium transition-all",
                             movieLength === key
-                              ? "bg-[--accent-soft] border-[--accent]/40 text-[--accent]"
+                              ? "bg-blue-600/20 border-blue-500/50 text-blue-300 shadow-lg shadow-blue-500/20 scale-105"
                               : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
                           )}>
                           <span>{config.icon}</span>
@@ -1438,7 +1462,7 @@ Return a JSON object:
                             </div>
 
                             {/* Actions */}
-                            <div className="flex items-center gap-1.5 shrink-0">
+                            <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
                               {scene.status === 'completed' && (
                                 <>
                                   {!scene.approved && (
