@@ -67,6 +67,9 @@ export default function App() {
   const [characterImageDescription, setCharacterImageDescription] = useState('');
   const [movieLength, setMovieLength] = useState<MovieLength>('medium');
   const [totalSpent, setTotalSpent] = useState(0); // Total USD spent this session
+  const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false);
+  const [apiKeyDraft, setApiKeyDraft] = useState('');
   // Export state
   const [exportStatus, setExportStatus] = useState<ExportStatus>('idle');
   const [exportProgress, setExportProgress] = useState(0);
@@ -120,25 +123,47 @@ export default function App() {
     }
   }, [currentSceneIndex, script]);
 
+  // Get active API key (custom override > env vars)
+  const getApiKey = () => customApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY || '';
+  const getGeminiKey = () => customApiKey || process.env.GEMINI_API_KEY || '';
+
   // Check for API Key on mount
   useEffect(() => {
     const checkKey = async () => {
-      if (window.aistudio?.hasSelectedApiKey) {
+      if (customApiKey) {
+        setIsApiKeySelected(true);
+      } else if (window.aistudio?.hasSelectedApiKey) {
         const hasKey = await window.aistudio.hasSelectedApiKey();
         setIsApiKeySelected(hasKey);
       } else if (process.env.API_KEY || process.env.GEMINI_API_KEY) {
-        // Running locally with env keys — auto-enable
         setIsApiKeySelected(true);
       }
     };
     checkKey();
-  }, []);
+  }, [customApiKey]);
 
   const handleOpenKeyDialog = async () => {
     if (window.aistudio?.openSelectKey) {
       await window.aistudio.openSelectKey();
       setIsApiKeySelected(true);
+    } else {
+      // Show custom API key input
+      setApiKeyDraft(customApiKey);
+      setShowApiKeyInput(true);
     }
+  };
+
+  const saveApiKey = () => {
+    const key = apiKeyDraft.trim();
+    setCustomApiKey(key);
+    if (key) {
+      localStorage.setItem('gemini_api_key', key);
+      setIsApiKeySelected(true);
+    } else {
+      localStorage.removeItem('gemini_api_key');
+      setIsApiKeySelected(!!(process.env.API_KEY || process.env.GEMINI_API_KEY));
+    }
+    setShowApiKeyInput(false);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -185,7 +210,7 @@ export default function App() {
       return;
     }
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const ai = new GoogleGenAI({ apiKey: getGeminiKey() });
       const imageParts = images.map(img => ({
         inlineData: { data: img.data, mimeType: img.mimeType }
       }));
@@ -232,8 +257,8 @@ Output ONLY the description, no preamble. Be ruthlessly specific — vague descr
     setError(null);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
+      const ai = new GoogleGenAI({ apiKey: getGeminiKey() });
+
       // Prepare image parts for Gemini to "see" the references
       const imageParts = referenceImages.map(img => ({
         inlineData: {
@@ -431,8 +456,7 @@ Return a JSON object:
     setIsProcessingVideo(true);
 
     try {
-      // Use API_KEY for Veo as it requires a paid key, fallback to GEMINI_API_KEY
-      const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
+      const apiKey = getApiKey();
       const ai = new GoogleGenAI({ apiKey });
       // Read previous scene from ref to get the latest videoObject (critical for chaining)
       const prevScene = index > 0 ? scriptRef.current?.scenes[index - 1] ?? null : null;
@@ -1018,12 +1042,16 @@ Return a JSON object:
                 <span className="text-[--text-muted] hidden sm:inline">/ ~${(script.scenes.length * SCENE_COST).toFixed(2)} total</span>
               </div>
             )}
-            {!isApiKeySelected && (
-              <button onClick={handleOpenKeyDialog} className="px-3 py-1.5 bg-[--warning-soft] text-[--warning] border border-[--warning]/20 rounded-lg text-xs font-medium">
-                <Settings className="w-3.5 h-3.5 inline mr-1" />Connect
-              </button>
-            )}
-            <div className="w-2 h-2 bg-[--success] rounded-full animate-pulse" />
+            <button onClick={() => { setApiKeyDraft(customApiKey); setShowApiKeyInput(true); }}
+              className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all",
+                isApiKeySelected
+                  ? "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
+                  : "bg-[--warning-soft] text-[--warning] border-[--warning]/20"
+              )}
+              title={isApiKeySelected ? `API Key: ...${getApiKey().slice(-6)}` : 'Set API Key'}>
+              <Settings className="w-3.5 h-3.5 inline mr-1" />{isApiKeySelected ? 'Key' : 'Connect'}
+            </button>
+            <div className={cn("w-2 h-2 rounded-full", isApiKeySelected ? "bg-[--success] animate-pulse" : "bg-[--warning]")} />
           </div>
         </div>
       </header>
@@ -1042,6 +1070,53 @@ Return a JSON object:
                 <X className="w-4 h-4" />
               </button>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* API Key Dialog */}
+      <AnimatePresence>
+        {showApiKeyInput && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+            onClick={(e) => { if (e.target === e.currentTarget) setShowApiKeyInput(false); }}>
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[--bg-elevated] border border-[--border-subtle] rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-lg">API Key</h3>
+                <button onClick={() => setShowApiKeyInput(false)} className="p-1.5 hover:bg-white/10 rounded-lg">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-[--text-muted] leading-relaxed">
+                Enter your Google AI Studio API key. Get one at{' '}
+                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
+                  className="text-[--accent] underline">aistudio.google.com/apikey</a>.
+                The key is saved locally in your browser.
+              </p>
+              <input type="password" value={apiKeyDraft} onChange={(e) => setApiKeyDraft(e.target.value)}
+                placeholder="AIza..."
+                className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm font-mono focus:outline-none focus:border-[--accent]/50 placeholder:text-[--text-muted]"
+                onKeyDown={(e) => { if (e.key === 'Enter') saveApiKey(); }}
+              />
+              {customApiKey && (
+                <p className="text-[10px] text-[--success] flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" /> Active key: ...{customApiKey.slice(-6)}
+                </p>
+              )}
+              <div className="flex items-center gap-2">
+                <button onClick={saveApiKey}
+                  className="flex-1 py-2.5 bg-[--accent] hover:bg-blue-500 rounded-xl text-sm font-bold transition-all">
+                  Save
+                </button>
+                {customApiKey && (
+                  <button onClick={() => { setApiKeyDraft(''); setCustomApiKey(''); localStorage.removeItem('gemini_api_key'); setIsApiKeySelected(!!(process.env.API_KEY || process.env.GEMINI_API_KEY)); setShowApiKeyInput(false); }}
+                    className="py-2.5 px-4 bg-[--danger-soft] text-[--danger] rounded-xl text-sm font-medium transition-all">
+                    Clear
+                  </button>
+                )}
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
