@@ -19,6 +19,9 @@ export default defineConfig(({mode}) => {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
+      // Allow access from Cloudflare Tunnel (quick tunnels use random subdomains
+      // of trycloudflare.com). The leading dot acts as a wildcard for subdomains.
+      allowedHosts: ['.trycloudflare.com'],
     },
   };
 });
