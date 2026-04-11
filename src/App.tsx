@@ -197,7 +197,13 @@ export default function App() {
   };
 
   const saveApiKey = () => {
-    const key = apiKeyDraft.trim();
+    // Strip any non-ASCII characters and whitespace
+    const key = apiKeyDraft.replace(/[^\x20-\x7E]/g, '').trim();
+    if (key && !/^[A-Za-z0-9_-]+$/.test(key)) {
+      setError('Invalid API key — only English letters, numbers, dashes and underscores are allowed.');
+      return;
+    }
+    setApiKeyDraft(key);
     setCustomApiKey(key);
     if (key) {
       localStorage.setItem('gemini_api_key', key);
@@ -669,28 +675,19 @@ Return a JSON object:
         : '';
       const promptText = charLock + transitionLock + (scene.visualPrompt?.trim() || scene.description?.trim() || "A cinematic scene...");
 
-      if (prevScene && prevScene.videoObject) {
-        // Extend the previous video for continuity
-        // CRITICAL: referenceImages are NOT supported when extending a video
-        operation = await videoWithRetry(() => ai.models.generateVideos({
-          model: VEO_MODEL,
-          prompt: promptText,
-          video: prevScene.videoObject,
-          config: videoConfig
-        }));
-      } else {
-        // Generate initial video
-        // referenceImages are supported for initial video generation with veo-3.1-generate-preview
-        if (referenceImagesPayload.length > 0) {
-          videoConfig.referenceImages = referenceImagesPayload;
-        }
-        
-        operation = await videoWithRetry(() => ai.models.generateVideos({
-          model: VEO_MODEL,
-          prompt: promptText,
-          config: videoConfig
-        }));
+      // ALWAYS send reference images for character consistency in EVERY scene
+      // We prioritize character lock over video extension because Veo doesn't
+      // support both referenceImages + video at the same time, and without
+      // reference images the character drifts (e.g. bear → mouse)
+      if (referenceImagesPayload.length > 0) {
+        videoConfig.referenceImages = referenceImagesPayload;
       }
+
+      operation = await videoWithRetry(() => ai.models.generateVideos({
+        model: VEO_MODEL,
+        prompt: promptText,
+        config: videoConfig
+      }));
 
       // Poll for completion
       while (!operation.done) {
