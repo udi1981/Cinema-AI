@@ -38,7 +38,41 @@ export type MovieStyle = 'Pixar' | 'Realistic' | 'Paper Folding' | 'Cyberpunk' |
 
 export type AudioLanguage = 'he' | 'en' | 'zh';
 
-export type WizardStep = 'story' | 'style' | 'language' | 'timeline' | 'preview';
+export type WizardStep = 'projects' | 'story' | 'style' | 'language' | 'timeline' | 'preview' | 'pricing';
+
+export type PlanTier = 'free' | 'basic' | 'pro' | 'studio' | 'unlimited';
+
+export type UserProfile = {
+  name: string;
+  email: string;
+  plan: PlanTier;
+  credits: number; // films remaining this month
+  scenesUsed: number; // scenes produced (free tier limit)
+};
+
+export type Project = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  prompt: string;
+  style: MovieStyle;
+  movieLength: MovieLength;
+  scriptModel: string;
+  beCreative: boolean;
+  isManualMode: boolean;
+  selectedLanguages: AudioLanguage[];
+  script: MovieScript | null;
+  characterImageDescription: string;
+};
+
+export const PLAN_CONFIG: Record<PlanTier, { label: string; price: number; films: number; desc: string }> = {
+  free: { label: 'Free', price: 0, films: 0, desc: '2 demo scenes only' },
+  basic: { label: 'Basic', price: 5, films: 1, desc: '1 film / month' },
+  pro: { label: 'Pro', price: 10, films: 3, desc: '3 films / month' },
+  studio: { label: 'Studio', price: 20, films: 7, desc: '7 films / month' },
+  unlimited: { label: 'Unlimited', price: 50, films: 20, desc: '20 films / month' },
+};
 
 export type ExportStatus = 'idle' | 'loading-ffmpeg' | 'processing' | 'done' | 'error';
 
