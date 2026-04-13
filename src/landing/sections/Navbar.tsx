@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Film, Globe, Menu, X, User, LogOut, CreditCard, Settings } from 'lucide-react';
+import { Film, Globe, Menu, X, User, LogOut, CreditCard, Settings, Compass } from 'lucide-react';
 import { UI_LANGUAGES } from '../../i18n';
 import { useAuth } from '../../contexts/AuthContext';
 import type { UILanguage } from '../../types';
@@ -15,6 +15,7 @@ const NAV_LINKS = [
   { key: 'nav.howItWorks', href: '#how' },
   { key: 'nav.useCases', href: '#cases' },
   { key: 'nav.pricing', href: '#pricing' },
+  { key: 'nav.discover', href: '#/discover', isRoute: true },
 ];
 
 const Navbar = ({ lang, setLang, T }: NavbarProps) => {
@@ -42,8 +43,12 @@ const Navbar = ({ lang, setLang, T }: NavbarProps) => {
     }
   }, [langOpen, userMenuOpen]);
 
-  const handleNavClick = (href: string) => {
+  const handleNavClick = (href: string, isRoute?: boolean) => {
     setMobileOpen(false);
+    if (isRoute) {
+      window.location.hash = href;
+      return;
+    }
     const el = document.querySelector(href);
     if (el) el.scrollIntoView({ behavior: 'smooth' });
   };
@@ -78,7 +83,7 @@ const Navbar = ({ lang, setLang, T }: NavbarProps) => {
             {NAV_LINKS.map((link) => (
               <button
                 key={link.key}
-                onClick={() => handleNavClick(link.href)}
+                onClick={() => handleNavClick(link.href, link.isRoute)}
                 className="text-sm text-white/60 hover:text-white transition-colors font-medium"
               >
                 {T(link.key)}
@@ -167,6 +172,9 @@ const Navbar = ({ lang, setLang, T }: NavbarProps) => {
                         <a href="#/studio" className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-white/70 hover:bg-white/5 hover:text-white transition-colors">
                           <Film className="w-4 h-4" /> Studio
                         </a>
+                        <a href="#/discover" className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-white/70 hover:bg-white/5 hover:text-white transition-colors">
+                          <Compass className="w-4 h-4" /> Discover
+                        </a>
                         <a href="#/profile" className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-white/70 hover:bg-white/5 hover:text-white transition-colors">
                           <Settings className="w-4 h-4" /> Profile & Settings
                         </a>
@@ -253,7 +261,7 @@ const Navbar = ({ lang, setLang, T }: NavbarProps) => {
                 {NAV_LINKS.map((link) => (
                   <button
                     key={link.key}
-                    onClick={() => handleNavClick(link.href)}
+                    onClick={() => handleNavClick(link.href, link.isRoute)}
                     className="text-start text-base text-white/70 hover:text-white transition-colors py-2"
                   >
                     {T(link.key)}
@@ -277,6 +285,9 @@ const Navbar = ({ lang, setLang, T }: NavbarProps) => {
                     </div>
                     <a href="#/studio" className="text-start text-base text-white/70 hover:text-white transition-colors py-2">
                       Studio
+                    </a>
+                    <a href="#/discover" className="text-start text-base text-white/70 hover:text-white transition-colors py-2">
+                      Discover
                     </a>
                     <a href="#/profile" className="text-start text-base text-white/70 hover:text-white transition-colors py-2">
                       Profile & Settings

@@ -8,6 +8,7 @@ const T: Translations = {
   'nav.howItWorks': { en: 'How It Works', he: 'איך זה עובד', ar: 'كيف يعمل', fr: 'Comment ça marche', zh: '工作原理', pt: 'Como funciona', es: 'Cómo funciona', de: 'So funktioniert es', it: 'Come funziona', ru: 'Как это работает', ko: '작동 방식', ja: '使い方' },
   'nav.useCases': { en: 'Use Cases', he: 'שימושים', ar: 'حالات الاستخدام', fr: 'Cas d\'utilisation', zh: '使用场景', pt: 'Casos de uso', es: 'Casos de uso', de: 'Anwendungsfälle', it: 'Casi d\'uso', ru: 'Варианты использования', ko: '활용 사례', ja: '活用例' },
   'nav.pricing': { en: 'Pricing', he: 'מחירים', ar: 'الأسعار', fr: 'Tarifs', zh: '定价', pt: 'Preços', es: 'Precios', de: 'Preise', it: 'Prezzi', ru: 'Цены', ko: '요금', ja: '料金' },
+  'nav.discover': { en: 'Discover', he: 'גלה', ar: 'اكتشف', fr: 'Découvrir', zh: '发现', pt: 'Descobrir', es: 'Descubrir', de: 'Entdecken', it: 'Scopri', ru: 'Обзор', ko: '탐색', ja: '発見' },
   'nav.tryFree': { en: 'Try Free', he: 'נסה בחינם', ar: 'جرب مجاناً', fr: 'Essai gratuit', zh: '免费试用', pt: 'Teste grátis', es: 'Prueba gratis', de: 'Kostenlos testen', it: 'Prova gratis', ru: 'Попробовать', ko: '무료 체험', ja: '無料で試す' },
 
   // ===== HERO =====

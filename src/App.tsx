@@ -2701,6 +2701,30 @@ Return a JSON object:
                               className="flex items-center gap-2 px-5 py-3 bg-emerald-500 text-white rounded-xl text-sm font-bold w-full justify-center hover:bg-emerald-400 transition-all">
                               <Download className="w-4 h-4" /> {T('downloadMp4')}
                             </button>
+
+                            {/* Social Sharing */}
+                            <div className="pt-3 border-t border-[--border-subtle]">
+                              <p className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider mb-2">Share your movie</p>
+                              <div className="flex flex-wrap gap-2">
+                                {[
+                                  { name: 'WhatsApp', icon: '💬', color: 'bg-[#25D366]/20 text-[#25D366] hover:bg-[#25D366]/30', url: () => `https://wa.me/?text=${encodeURIComponent(`Check out my AI movie "${script?.title}" made with Cinema AI Studio!\nhttps://ai-movie-creator.pages.dev`)}` },
+                                  { name: 'X', icon: '𝕏', color: 'bg-white/10 text-white hover:bg-white/15', url: () => `https://twitter.com/intent/tweet?text=${encodeURIComponent(`I just created "${script?.title}" with AI 🎬\n\nMade with Cinema AI Studio`)}&url=${encodeURIComponent('https://ai-movie-creator.pages.dev')}` },
+                                  { name: 'Facebook', icon: 'f', color: 'bg-[#1877F2]/20 text-[#1877F2] hover:bg-[#1877F2]/30', url: () => `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent('https://ai-movie-creator.pages.dev')}&quote=${encodeURIComponent(`Check out my AI movie "${script?.title}"!`)}` },
+                                  { name: 'LinkedIn', icon: 'in', color: 'bg-[#0A66C2]/20 text-[#0A66C2] hover:bg-[#0A66C2]/30', url: () => `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent('https://ai-movie-creator.pages.dev')}` },
+                                  { name: 'Telegram', icon: '✈', color: 'bg-[#26A5E4]/20 text-[#26A5E4] hover:bg-[#26A5E4]/30', url: () => `https://t.me/share/url?url=${encodeURIComponent('https://ai-movie-creator.pages.dev')}&text=${encodeURIComponent(`Check out my AI movie "${script?.title}"!`)}` },
+                                  { name: 'Email', icon: '✉', color: 'bg-white/10 text-white/70 hover:bg-white/15', url: () => `mailto:?subject=${encodeURIComponent(`Check out my AI movie: ${script?.title}`)}&body=${encodeURIComponent(`I created "${script?.title}" using Cinema AI Studio!\n\nhttps://ai-movie-creator.pages.dev`)}` },
+                                ].map((platform) => (
+                                  <a key={platform.name} href={platform.url()} target="_blank" rel="noopener noreferrer"
+                                    className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${platform.color}`}>
+                                    <span className="text-sm">{platform.icon}</span>
+                                    {platform.name}
+                                  </a>
+                                ))}
+                              </div>
+                              <p className="text-[10px] text-[--text-muted] mt-2">
+                                Download the video first, then upload it to TikTok, Instagram, or YouTube directly from your device.
+                              </p>
+                            </div>
                           </div>
                         )}
 
