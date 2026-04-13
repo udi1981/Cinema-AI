@@ -162,14 +162,14 @@ const ProfilePage = () => {
           </div>
 
           <div className="flex items-center gap-3">
-            <a href="#/studio" onClick={() => { window.location.hash = '#/studio'; /* navigate to pricing step handled by app */ }}
+            <a href="#/billing"
               className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white rounded-xl text-sm font-semibold transition-all">
-              <Crown className="w-4 h-4" /> Upgrade Plan
+              <Crown className="w-4 h-4" /> Manage Billing
             </a>
-            <div className="flex items-center gap-1.5 text-white/30 text-xs">
+            <a href="#/billing" className="flex items-center gap-1.5 text-white/40 hover:text-white/60 text-xs transition-colors">
               <CreditCard className="w-3.5 h-3.5" />
-              <span>Stripe billing coming soon</span>
-            </div>
+              <span>View plans & invoices</span>
+            </a>
           </div>
         </motion.div>
 

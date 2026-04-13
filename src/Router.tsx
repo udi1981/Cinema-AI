@@ -8,6 +8,7 @@ const TermsPage = lazy(() => import('./pages/legal/TermsPage'));
 const PrivacyPage = lazy(() => import('./pages/legal/PrivacyPage'));
 const AcceptableUsePage = lazy(() => import('./pages/legal/AcceptableUsePage'));
 const HelpPage = lazy(() => import('./pages/legal/HelpPage'));
+const BillingPage = lazy(() => import('./pages/BillingPage'));
 
 const LoadingScreen = () => (
   <div className="min-h-screen flex items-center justify-center" style={{ background: '#07070e' }}>
@@ -86,6 +87,10 @@ const Router = () => {
 
   if (route === 'help') {
     return <Suspense fallback={<LoadingScreen />}><HelpPage /></Suspense>;
+  }
+
+  if (route === 'billing') {
+    return <Suspense fallback={<LoadingScreen />}><BillingPage /></Suspense>;
   }
 
   return <LandingPage />;
