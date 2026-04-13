@@ -683,6 +683,10 @@ Return a JSON object:
       }));
 
       const scriptData = JSON.parse(response.text || '{}') as MovieScript;
+      // Validate response has scenes
+      if (!scriptData.scenes || !Array.isArray(scriptData.scenes) || scriptData.scenes.length === 0) {
+        throw new Error('AI returned empty or invalid script. Please try again, or switch to a different model (e.g. Gemini 2.5 Flash).');
+      }
       // Ensure characterDescriptions exists
       if (!scriptData.characterDescriptions) {
         scriptData.characterDescriptions = '';
@@ -703,8 +707,12 @@ Return a JSON object:
     } catch (err: any) {
       console.error("Script generation failed:", err);
       let errorMessage = "Failed to generate script. Please try again.";
-      if (err.message?.includes("429") || err.message?.includes("RESOURCE_EXHAUSTED")) {
-        errorMessage = "Script generation quota exceeded. Please wait a few minutes or check your Gemini API billing plan (https://ai.google.dev/gemini-api/docs/rate-limits).";
+      if (err.message?.includes("503") || err.message?.includes("UNAVAILABLE") || err.message?.includes("high demand")) {
+        errorMessage = "Model is overloaded (503). Try switching to a different model (e.g. Gemini 2.5 Flash) or wait a few minutes.";
+      } else if (err.message?.includes("429") || err.message?.includes("RESOURCE_EXHAUSTED")) {
+        errorMessage = "Script generation quota exceeded. Please wait a few minutes or check your Gemini API billing plan.";
+      } else if (err.message?.includes("invalid") || err.message?.includes("empty")) {
+        errorMessage = err.message;
       }
       setError(errorMessage);
     } finally {
