@@ -148,7 +148,7 @@ const HeroSection = ({ T }: HeroSectionProps) => {
           className="flex flex-col sm:flex-row items-center gap-4 mt-2"
         >
           <a
-            href="#/studio"
+            href="#/auth"
             className="relative inline-flex items-center gap-2.5 bg-gradient-to-r from-[#10B981] to-[#10B981] rounded-xl px-10 py-4 font-bold text-lg shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all hover:scale-105 text-white"
           >
             <span

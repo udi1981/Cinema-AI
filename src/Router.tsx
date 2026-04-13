@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState, useEffect } from 'react';
+import { useAuth } from './contexts/AuthContext';
 
 const App = lazy(() => import('./App'));
 const AuthPage = lazy(() => import('./pages/AuthPage'));
@@ -21,6 +22,21 @@ import LandingPage from './landing/LandingPage';
 
 const Router = () => {
   const [hash, setHash] = useState(window.location.hash);
+  const { loading: authLoading, isAuthenticated } = useAuth();
+
+  // Detect Supabase OAuth callback tokens in the hash and process them
+  useEffect(() => {
+    const raw = window.location.hash;
+    if (raw.includes('access_token=') && raw.includes('token_type=')) {
+      // Supabase OAuth redirect — tokens are in the hash fragment
+      // Supabase client will auto-detect and process them via onAuthStateChange
+      // Replace the hash with the studio route after a brief delay for processing
+      const timer = setTimeout(() => {
+        window.location.hash = '#/studio';
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
   useEffect(() => {
     const onHashChange = () => setHash(window.location.hash);
@@ -29,6 +45,11 @@ const Router = () => {
   }, []);
 
   const route = hash.replace('#', '').replace(/^\//, '') || '';
+
+  // While processing OAuth tokens, show loading
+  if (route.includes('access_token=') && route.includes('token_type=')) {
+    return <LoadingScreen />;
+  }
 
   // Parse template ID from hash: #/studio?template=children → 'children'
   const isStudio = route.startsWith('studio') || route.startsWith('app');

@@ -118,7 +118,7 @@ const Navbar = ({ lang, setLang, T }: NavbarProps) => {
 
             {/* CTA */}
             <a
-              href="#/studio"
+              href="#/auth"
               className="hidden sm:inline-flex items-center px-5 py-2 text-sm font-semibold rounded-lg bg-gradient-to-r from-[#10B981] to-[#10B981] hover:shadow-lg hover:shadow-emerald-500/25 transition-shadow"
             >
               {T('nav.tryFree')}
@@ -176,7 +176,7 @@ const Navbar = ({ lang, setLang, T }: NavbarProps) => {
                   Sign In
                 </a>
                 <a
-                  href="#/studio"
+                  href="#/auth"
                   className="mt-4 text-center px-5 py-3 text-sm font-semibold rounded-lg bg-gradient-to-r from-[#10B981] to-[#10B981]"
                 >
                   {T('nav.tryFree')}

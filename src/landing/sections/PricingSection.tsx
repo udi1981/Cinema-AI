@@ -101,7 +101,7 @@ const PricingSection = ({ T }: PricingSectionProps) => {
 
                   {/* CTA */}
                   <a
-                    href="#/studio"
+                    href="#/auth"
                     className={`block text-center py-2.5 rounded-lg font-semibold text-sm transition-all ${
                       isPro
                         ? 'bg-gradient-to-r from-[#10B981] to-[#10B981] text-white hover:shadow-lg hover:shadow-emerald-500/25'

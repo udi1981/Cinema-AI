@@ -124,7 +124,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       console.warn('Supabase not configured — cannot sign in');
       return;
     }
-    const redirectTo = window.location.origin + window.location.pathname + '#/studio';
+    // redirectTo must NOT contain a hash fragment — Supabase appends #access_token=...
+    // After auth completes, the Router's OAuth detection will redirect to #/studio
+    const redirectTo = window.location.origin + window.location.pathname;
     await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo },

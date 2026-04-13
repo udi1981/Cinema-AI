@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { writeFileSync } from 'fs';
 
-const ai = new GoogleGenAI({ apiKey: 'AIzaSyDDLgqemok78UVWcpZ0FPekFgnfqONj9A4' });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const MODEL = 'imagen-4.0-generate-001';
 
 async function main() {

@@ -3,8 +3,17 @@ import { motion } from 'motion/react';
 import { Film, Mail, Lock, User, Eye, EyeOff, AlertCircle } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
+const LoadingScreen = () => (
+  <div className="min-h-screen flex items-center justify-center" style={{ background: '#07070e' }}>
+    <div className="flex flex-col items-center gap-4">
+      <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+      <p className="text-white/50 text-sm font-medium tracking-wide">Redirecting...</p>
+    </div>
+  </div>
+);
+
 const AuthPage = () => {
-  const { signInWithGoogle, signInWithEmail, signUpWithEmail } = useAuth();
+  const { signInWithGoogle, signInWithEmail, signUpWithEmail, isAuthenticated, loading: authLoading } = useAuth();
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -39,6 +48,12 @@ const AuthPage = () => {
       setLoading(false);
     }
   };
+
+  // Redirect to studio if already logged in
+  if (!authLoading && isAuthenticated) {
+    window.location.hash = '#/studio';
+    return <LoadingScreen />;
+  }
 
   if (emailSent) {
     return (

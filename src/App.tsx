@@ -371,9 +371,9 @@ export default function App({ templateId }: { templateId?: string } = {}) {
     };
   }, [currentSceneIndex, script]);
 
-  // Get active API key (custom override > env vars)
-  const getApiKey = () => customApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY || '';
-  const getGeminiKey = () => customApiKey || process.env.GEMINI_API_KEY || '';
+  // Get active API key — user MUST provide their own key, no env fallback
+  const getApiKey = () => customApiKey || '';
+  const getGeminiKey = () => customApiKey || '';
 
   // Check for API Key on mount
   useEffect(() => {
@@ -383,8 +383,8 @@ export default function App({ templateId }: { templateId?: string } = {}) {
       } else if (window.aistudio?.hasSelectedApiKey) {
         const hasKey = await window.aistudio.hasSelectedApiKey();
         setIsApiKeySelected(hasKey);
-      } else if (process.env.API_KEY || process.env.GEMINI_API_KEY) {
-        setIsApiKeySelected(true);
+      } else {
+        setIsApiKeySelected(false);
       }
     };
     checkKey();

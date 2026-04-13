@@ -110,7 +110,7 @@ const FinalCTA = ({ T }: FinalCTAProps) => {
           transition={{ duration: 0.6, delay: 0.3 }}
         >
           <a
-            href="#/studio"
+            href="#/auth"
             className="inline-flex items-center gap-2.5 bg-gradient-to-r from-[#10B981] to-[#10B981] rounded-lg px-10 py-4 font-bold text-lg text-white transition-transform hover:scale-105"
             style={{ animation: 'cta-glow 3s ease-in-out infinite' }}
           >

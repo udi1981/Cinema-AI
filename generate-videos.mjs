@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 
-const ai = new GoogleGenAI({ apiKey: 'AIzaSyDDLgqemok78UVWcpZ0FPekFgnfqONj9A4' });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const MODEL = 'veo-3.1-generate-preview';
 const OUT = './public/landing/videos';
 
@@ -51,7 +51,7 @@ async function generateVideo(video) {
   // Download the video (append API key for auth)
   const uri = vid.video.uri;
   const separator = uri.includes('?') ? '&' : '?';
-  const authUri = `${uri}${separator}key=AIzaSyDDLgqemok78UVWcpZ0FPekFgnfqONj9A4`;
+  const authUri = `${uri}${separator}key=${process.env.GEMINI_API_KEY}`;
   console.log(`  Downloading from: ${uri}`);
   const resp = await fetch(authUri);
   if (!resp.ok) {

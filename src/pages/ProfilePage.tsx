@@ -6,7 +6,7 @@ import { PLAN_CONFIG } from '../types';
 import type { PlanTier } from '../types';
 
 const ProfilePage = () => {
-  const { user, profile, signOut, updateProfile, isAuthenticated } = useAuth();
+  const { user, profile, signOut, updateProfile, isAuthenticated, loading: authLoading } = useAuth();
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(profile.name);
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
@@ -15,6 +15,17 @@ const ProfilePage = () => {
 
   // Read existing API key from localStorage (backwards compat)
   const existingKey = localStorage.getItem('gemini_api_key') || '';
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#07070e] flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-white/50 text-sm font-medium">Loading profile...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
     return (
