@@ -11,9 +11,9 @@
   --text-primary: rgba(255, 255, 255, 0.93);
   --text-secondary: rgba(255, 255, 255, 0.55);
   --text-muted: rgba(255, 255, 255, 0.30);
-  --accent: #4f8cff;
-  --accent-soft: rgba(79, 140, 255, 0.12);
-  --accent-glow: rgba(79, 140, 255, 0.25);
+  --accent: #10B981;
+  --accent-soft: rgba(16, 185, 129, 0.12);
+  --accent-glow: rgba(16, 185, 129, 0.25);
   --success: #34d399;
   --success-soft: rgba(52, 211, 153, 0.12);
   --danger: #f87171;
@@ -39,6 +39,19 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 10px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+
+/* Hebrew font — Varela Round is a friendly, rounded Hebrew typeface */
+[lang="he"] body,
+[dir="rtl"] body {
+  font-family: 'Varela Round', 'Inter', system-ui, -apple-system, sans-serif;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+/* Varela Round has only 400 weight — simulate bold with text-shadow */
+[dir="rtl"] h1, [dir="rtl"] h2, [dir="rtl"] h3,
+[dir="rtl"] .font-bold, [dir="rtl"] .font-extrabold, [dir="rtl"] .font-black, [dir="rtl"] .font-semibold {
+  -webkit-text-stroke: 0.4px currentColor;
+}
 
 /* Safe area for mobile */
 .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }

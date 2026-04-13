@@ -26,13 +26,66 @@ import {
   User,
   Crown,
   Folder,
+  Menu,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI, Modality, VideoGenerationReferenceType } from "@google/genai";
+import { GoogleGenAI, Modality } from "@google/genai";
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { cn } from './lib/utils';
-import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardStep, ExportStatus, MovieLength, SCENE_COST, COST_PER_SCENE, estimateScenes, Project, UserProfile, PlanTier, PLAN_CONFIG } from './types';
+import { MovieScript, Scene, MovieStyle, ReferenceImage, AudioLanguage, WizardStep, ExportStatus, MovieLength, SCENE_COST, COST_PER_SCENE, estimateScenes, Project, UserProfile, PlanTier, PLAN_CONFIG, UILanguage } from './types';
+import { t, isRTL, UI_LANGUAGES } from './i18n';
+import { getTemplate } from './templates';
+import { useAuth } from './contexts/AuthContext';
+
+// ===== IndexedDB helpers for persisting video/audio blobs across refresh =====
+const MEDIA_DB_NAME = 'cinema_media';
+const MEDIA_STORE = 'blobs';
+const MEDIA_DB_VERSION = 1;
+
+function openMediaDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(MEDIA_DB_NAME, MEDIA_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(MEDIA_STORE)) {
+        db.createObjectStore(MEDIA_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveMediaBlob(key: string, blob: Blob): Promise<void> {
+  const db = await openMediaDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_STORE, 'readwrite');
+    tx.objectStore(MEDIA_STORE).put(blob, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function loadMediaBlob(key: string): Promise<Blob | null> {
+  const db = await openMediaDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_STORE, 'readonly');
+    const req = tx.objectStore(MEDIA_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function deleteMediaBlob(key: string): Promise<void> {
+  const db = await openMediaDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_STORE, 'readwrite');
+    tx.objectStore(MEDIA_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
 
 // Constants
 const VEO_MODEL = 'veo-3.1-generate-preview';
@@ -56,7 +109,7 @@ const LANGUAGE_CONFIG: Record<AudioLanguage, { label: string; flag: string; voic
   zh: { label: '中文', flag: '🇨🇳', voice: 'Enceladus', ttsLang: 'Chinese Mandarin' },
 };
 
-export default function App() {
+export default function App({ templateId }: { templateId?: string } = {}) {
   // State
   const [prompt, setPrompt] = useState('');
   const [style, setStyle] = useState<MovieStyle>('Pixar');
@@ -73,7 +126,14 @@ export default function App() {
   const [isManualMode, setIsManualMode] = useState(false);
   const [editingSceneId, setEditingSceneId] = useState<string | null>(null);
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
-  const [audioLanguage, setAudioLanguage] = useState<AudioLanguage>('he');
+  const [audioLanguage, setAudioLanguage] = useState<AudioLanguage>(() => {
+    // Default to first selected language, not always 'he'
+    try {
+      const saved = localStorage.getItem('cinema_audio_lang');
+      if (saved) return saved as AudioLanguage;
+    } catch {}
+    return 'he';
+  });
   const [characterImageDescription, setCharacterImageDescription] = useState('');
   const [movieLength, setMovieLength] = useState<MovieLength>('medium');
   const [scriptModel, setScriptModel] = useState<string>(SCRIPT_MODELS[0].id);
@@ -88,12 +148,21 @@ export default function App() {
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [exportLanguage, setExportLanguage] = useState<AudioLanguage>('he');
   const [showExportDialog, setShowExportDialog] = useState(false);
-  // Projects state (localStorage)
-  const [projects, setProjects] = useState<Project[]>(() => JSON.parse(localStorage.getItem('cinema_projects') || '[]'));
+  // Background music for export
+  const [bgMusicFile, setBgMusicFile] = useState<File | null>(null);
+  const [bgMusicVolume, setBgMusicVolume] = useState(0.15); // 0-1, default 15% so narration stays clear
+  const bgMusicInputRef = useRef<HTMLInputElement>(null);
+  // Projects state (localStorage) — wrapped in try-catch for corrupt data safety
+  const [projects, setProjects] = useState<Project[]>(() => { try { return JSON.parse(localStorage.getItem('cinema_projects') || '[]'); } catch { return []; } });
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
-  // User profile state (localStorage)
-  const [userProfile, setUserProfile] = useState<UserProfile>(() => JSON.parse(localStorage.getItem('cinema_user') || '{"name":"","email":"","plan":"free","credits":0,"scenesUsed":0}'));
-  const [showProfile, setShowProfile] = useState(false);
+  // User profile from auth context (Supabase + localStorage fallback)
+  const { profile: userProfile, updateProfile } = useAuth();
+  const [showLangDropdown, setShowLangDropdown] = useState(false);
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
+  // UI language (persisted)
+  const [uiLang, setUiLang] = useState<UILanguage>(() => (localStorage.getItem('cinema_ui_lang') as UILanguage) || 'en');
+  const T = (key: string) => t(key, uiLang);
+  const rtl = isRTL(uiLang);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -113,6 +182,7 @@ export default function App() {
             ...s,
             // Don't save blob URLs — they expire on refresh
             videoUrl: undefined,
+            audioUrl: undefined,
             audioUrls: undefined,
           })),
         };
@@ -123,31 +193,149 @@ export default function App() {
     }
   }, [script]);
 
-  // Restore script from localStorage on mount
+  // Auto-save current project to localStorage whenever key state changes
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+  const currentProjectIdRef = useRef(currentProjectId);
+  currentProjectIdRef.current = currentProjectId;
+
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('cinema_script');
-      if (saved && !script) {
-        const parsed = JSON.parse(saved) as MovieScript;
-        // Reset video statuses — blobs are gone after refresh
-        parsed.scenes = parsed.scenes.map(s => ({
+    if (!prompt.trim() && !script) return; // Nothing to save
+    const savedProjects = projectsRef.current;
+    const projId = currentProjectIdRef.current || Math.random().toString(36).substr(2, 9);
+    const now = Date.now();
+    const project: Project = {
+      id: projId,
+      name: script?.title || prompt.substring(0, 40) || 'Untitled Project',
+      createdAt: savedProjects.find(p => p.id === projId)?.createdAt || now,
+      updatedAt: now,
+      prompt,
+      style,
+      movieLength,
+      scriptModel,
+      beCreative,
+      isManualMode,
+      selectedLanguages,
+      script: script ? {
+        ...script,
+        scenes: script.scenes.map(s => ({
           ...s,
-          status: s.status === 'generating' ? 'pending' : s.status === 'completed' && !s.videoUrl ? 'pending' : s.status,
           videoUrl: undefined,
-          audioUrls: undefined,
-        }));
-        setScript(parsed);
-        setWizardStep('timeline');
-      }
-    } catch (e) { /* corrupt data, ignore */ }
+          audioUrl: undefined,
+        })),
+      } : null,
+      characterImageDescription,
+    };
+    const updated = savedProjects.filter(p => p.id !== projId);
+    updated.unshift(project);
+    if (!currentProjectIdRef.current) {
+      setCurrentProjectId(projId);
+      currentProjectIdRef.current = projId;
+    }
+    // Update both localStorage and state
+    setProjects(updated);
+    try {
+      localStorage.setItem('cinema_projects', JSON.stringify(updated));
+    } catch (e) { /* storage full */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [script, prompt, style, movieLength, scriptModel, beCreative, isManualMode, selectedLanguages, characterImageDescription]);
+
+  // Restore script from localStorage on mount + restore media from IndexedDB
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = localStorage.getItem('cinema_script');
+        if (saved && !script) {
+          const parsed = JSON.parse(saved) as MovieScript;
+          // Try to restore video/audio blobs from IndexedDB
+          let anyMediaRestored = false;
+          for (const s of parsed.scenes) {
+            try {
+              const videoBlob = await loadMediaBlob(`video_${s.id}`);
+              if (videoBlob) {
+                s.videoUrl = URL.createObjectURL(videoBlob);
+                s.status = 'completed';
+                anyMediaRestored = true;
+                // Restore primary audio
+                const primaryAudioBlob = await loadMediaBlob(`audio_${s.id}_primary`);
+                if (primaryAudioBlob) {
+                  s.audioUrl = URL.createObjectURL(primaryAudioBlob);
+                }
+                // Restore lang media audio
+                if (!s.langMedia) s.langMedia = {};
+                for (const lang of ['he', 'en', 'zh'] as AudioLanguage[]) {
+                  const langAudioBlob = await loadMediaBlob(`audio_${s.id}_${lang}`);
+                  if (langAudioBlob) {
+                    if (!s.langMedia[lang]) s.langMedia[lang] = {};
+                    s.langMedia[lang].audioUrl = URL.createObjectURL(langAudioBlob);
+                  }
+                }
+              } else {
+                // No video in IndexedDB — reset to pending
+                s.status = s.status === 'generating' ? 'pending' : s.status === 'completed' ? 'pending' : s.status;
+                s.videoUrl = undefined;
+                s.audioUrl = undefined;
+              }
+            } catch (e) {
+              s.status = 'pending';
+              s.videoUrl = undefined;
+              s.audioUrl = undefined;
+            }
+          }
+          setScript(parsed);
+          setWizardStep('timeline');
+          if (anyMediaRestored) {
+            console.log('Media restored from IndexedDB after refresh');
+          }
+        }
+      } catch (e) { /* corrupt data, ignore */ }
+    })();
   }, []);
 
-  // Sync audio with video
+  // Persist UI language & set document direction
   useEffect(() => {
-    if (videoRef.current && audioRef.current) {
-      const video = videoRef.current;
-      const audio = audioRef.current;
+    localStorage.setItem('cinema_ui_lang', uiLang);
+    document.documentElement.dir = rtl ? 'rtl' : 'ltr';
+    document.documentElement.lang = uiLang;
+  }, [uiLang, rtl]);
 
+  // Sync audioLanguage with selectedLanguages — if current audio lang isn't in selected, switch to first selected
+  useEffect(() => {
+    if (selectedLanguages.length > 0 && !selectedLanguages.includes(audioLanguage)) {
+      setAudioLanguage(selectedLanguages[0]);
+    }
+  }, [selectedLanguages, audioLanguage]);
+
+  // Persist audioLanguage
+  useEffect(() => {
+    localStorage.setItem('cinema_audio_lang', audioLanguage);
+  }, [audioLanguage]);
+
+  // Sync audio with video + auto-advance to next scene on end
+  useEffect(() => {
+    const video = videoRef.current;
+    const audio = audioRef.current;
+
+    // Auto-advance: when video ends, play next scene if available
+    const handleVideoEnded = () => {
+      if (audio) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+      // Auto-advance to next completed scene
+      if (script && currentSceneIndex !== null) {
+        const nextIndex = currentSceneIndex + 1;
+        if (nextIndex < script.scenes.length && script.scenes[nextIndex].videoUrl) {
+          setCurrentSceneIndex(nextIndex);
+        }
+      }
+    };
+
+    if (video) {
+      video.addEventListener('ended', handleVideoEnded);
+    }
+
+    if (video && audio) {
       const syncAudio = () => {
         if (Math.abs(audio.currentTime - video.currentTime) > 0.2) {
           audio.currentTime = video.currentTime;
@@ -170,10 +358,17 @@ export default function App() {
       return () => {
         video.removeEventListener('play', playAudio);
         video.removeEventListener('pause', pauseAudio);
+        video.removeEventListener('ended', handleVideoEnded);
         video.removeEventListener('seeking', syncAudio);
         video.removeEventListener('timeupdate', syncAudio);
       };
     }
+
+    return () => {
+      if (video) {
+        video.removeEventListener('ended', handleVideoEnded);
+      }
+    };
   }, [currentSceneIndex, script]);
 
   // Get active API key (custom override > env vars)
@@ -194,6 +389,25 @@ export default function App() {
     };
     checkKey();
   }, [customApiKey]);
+
+  // Load template from landing page on mount
+  useEffect(() => {
+    if (!templateId) return;
+    const tmpl = getTemplate(templateId);
+    if (!tmpl) return;
+    // Only apply if user hasn't started working (no existing prompt or script)
+    if (prompt.trim() || script) return;
+    setPrompt(tmpl.prompt);
+    setStyle(tmpl.style);
+    setMovieLength(tmpl.movieLength);
+    setBeCreative(tmpl.beCreative);
+    setCharacterImageDescription(tmpl.characterDescription);
+    setSelectedLanguages(tmpl.selectedLanguages);
+    setAudioLanguage(tmpl.selectedLanguages[0] || 'he');
+    // Auto-advance past story step since it's pre-filled
+    setWizardStep('style');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateId]);
 
   const handleOpenKeyDialog = async () => {
     if (window.aistudio?.openSelectKey) {
@@ -225,33 +439,57 @@ export default function App() {
     setShowApiKeyInput(false);
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-
-    Array.from(files).forEach(file => {
-      if (referenceImages.length >= 3) return;
-      
+  // Shared helper: add image files (from upload, paste, or drop) to referenceImages
+  const addImageFiles = (files: File[]) => {
+    files.forEach(file => {
+      if (!file.type.startsWith('image/')) return;
       const reader = new FileReader();
       reader.onload = (event) => {
         const base64 = (event.target?.result as string).split(',')[1];
         const previewUrl = URL.createObjectURL(file);
-        
-        setReferenceImages(prev => [
-          ...prev, 
-          { 
-            id: Math.random().toString(36).substr(2, 9), 
-            data: base64, 
+        setReferenceImages(prev => {
+          if (prev.length >= 3) return prev;
+          return [...prev, {
+            id: Math.random().toString(36).substr(2, 9),
+            data: base64,
             mimeType: file.type,
             previewUrl
-          }
-        ].slice(0, 3));
+          }].slice(0, 3);
+        });
       };
       reader.readAsDataURL(file);
     });
-    
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    addImageFiles(Array.from(files));
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
+
+  // Global paste handler — Ctrl+V / mobile paste to add images
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      // Only handle paste on style step (where reference images live)
+      if (wizardStep !== 'style') return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imageFiles: File[] = [];
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        addImageFiles(imageFiles);
+      }
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [wizardStep]);
 
   const removeReferenceImage = (id: string) => {
     setReferenceImages(prev => {
@@ -355,10 +593,18 @@ Each "visualPrompt" must be a COMPLETE shot description containing ALL of the fo
 
 **COLOR & MOOD:** Dominant color palette (desaturated teal and orange, high-contrast black and red, pastel watercolor wash). Film stock emulation (Kodak Vision3 500T, ARRI Alexa look, 16mm grain). Mood keywords (haunting, euphoric, claustrophobic, dreamlike, visceral).
 
+**AUDIO IN VIDEO — CRITICAL RULE:** The video must contain ABSOLUTELY NO SPEECH, NO DIALOGUE, NO TALKING, NO VOICEOVER, NO SINGING, and NO HUMMING. Characters must NEVER open their mouths to speak or sing. The audio track for the video should contain ONLY ambient sound effects (wind, footsteps, rain, doors, engines, nature sounds, impacts, etc.) and cinematic background music/score. All spoken dialogue and narration will be added SEPARATELY via TTS in multiple languages — so the video itself must be COMPLETELY SILENT of any human voice. If a character is shown "speaking" in the scene, show them gesturing, emoting with facial expressions, or use a camera angle that avoids showing their mouth (over-the-shoulder, wide shot, silhouette, back of head). NEVER show lip movement synced to speech.
+
 **STYLE:** "${style}" style. Specify exactly how this style manifests: ${style === 'Pixar' ? 'Smooth subsurface scattering on skin, large expressive eyes, rounded soft geometry, saturated candy-like colors, subtle ambient occlusion, Pixar-quality cloth simulation' : style === 'Realistic' ? 'Photorealistic rendering, natural skin pores and imperfections, accurate cloth physics, cinematic depth of field f/1.4, lens flare on highlights, film grain' : style === 'Paper Folding' ? 'Everything built from folded paper/origami, visible paper texture and creases, stop-motion-like movement at 12fps, paper shadows, miniature diorama scale, warm craft lighting' : style === 'Cyberpunk' ? 'Neon-drenched environments, holographic UI overlays, rain-slicked streets reflecting neon, chrome and carbon fiber materials, LED tattoos, volumetric fog with colored light rays' : 'Hand-drawn pencil/ink linework visible, watercolor wash backgrounds, slight paper texture overlay, 2D parallax depth, Studio Ghibli-inspired movement fluidity'}
 
 **CONTINUITY & SEAMLESS TRANSITIONS (CRITICAL — NO VISUAL JUMPS):**
-Every scene MUST flow seamlessly into the next, as if they are one continuous film. For each scene (except the first), describe:
+Every scene MUST flow seamlessly into the next, as if they are one continuous film.
+
+CRITICAL ENDING RULE: Each scene's visualPrompt MUST describe an ENDING STATE that sets up the BEGINNING of the NEXT scene. The LAST 2 seconds of each scene should show the START of the next scene's action — NOT the completion of the current action.
+Example: If Scene 2 starts with "the dinosaur pushes its head through the shell", then Scene 1's visualPrompt must END with "At second 6, a crack widens and something pushes from inside" — NOT "the dinosaur is fully hatched."
+The video for each scene is generated independently. If Scene 1's video shows the dinosaur fully out, then Scene 2 (which starts with pushing through the shell) will be inconsistent. PREVENT this by ensuring Scene 1 ends BEFORE the action completes.
+
+For each scene (except the first), describe:
 - EXACT TRANSITION TYPE: "This scene begins exactly where the previous scene ended" / "Continuous camera movement from previous shot" / "Match cut from close-up to wide shot"
 - MATCHING ELEMENTS: The last frame of the previous scene and the first frame of this scene must share: same lighting direction, same color temperature, same weather, same time of day (unless a time skip is narrated)
 - CHARACTER POSITION: If the character was on the left side of frame in the previous scene's final moment, they must START on the left side in this scene
@@ -389,14 +635,18 @@ ${movieLength === 'short' ? 'COMPACT MODE: Group multiple story beats into cohes
 
 CRITICAL RULE: The ENTIRE story arc must be covered — beginning, middle, and end. Do NOT stop partway through. Do NOT skip the ending. Stay close to the target scene count.
 
-=== AUDIO DURATION MATCHING (CRITICAL) ===
-Video clips are 5-8 seconds long. The audioScript MUST fit within this time. Calculate: ~2.5 Hebrew words per second for natural speech.
-- 5 second scene = MAX 12 Hebrew words in audioScript
-- 6 second scene = MAX 15 Hebrew words
-- 7 second scene = MAX 17 Hebrew words
-- 8 second scene = MAX 20 Hebrew words
-If dialogue is LONGER than 20 words, SPLIT it across multiple scenes. Set "durationSeconds" to match the audioScript word count.
-NEVER put more text in audioScript than can be spoken in durationSeconds. The audio and video MUST end together — no cut-off mid-sentence.
+=== AUDIO DURATION MATCHING (CRITICAL — ZERO TOLERANCE FOR OVERFLOW) ===
+Video clips are 5-8 seconds long. The audioScript MUST fit within this time when spoken aloud.
+Hebrew speech rate: ~2.5 words/second for natural narration pace.
+IMPORTANT: The audioScript will be TRANSLATED to other languages (English, French, Chinese, etc.) which often EXPANDS the text by 30-50%. You MUST keep the Hebrew audioScript SHORT enough that even after translation expansion, the spoken audio fits within the video duration.
+Use these STRICT limits (already accounting for translation expansion):
+- 5 second scene = MAX 8 Hebrew words in audioScript
+- 6 second scene = MAX 10 Hebrew words
+- 7 second scene = MAX 12 Hebrew words
+- 8 second scene = MAX 15 Hebrew words
+If dialogue is LONGER than 15 words, you MUST SPLIT it across multiple scenes. Set "durationSeconds" to match the audioScript word count.
+NEVER put more text in audioScript than can be spoken in durationSeconds. The audio and video MUST end together — no cut-off mid-sentence, no audio continuing after video ends.
+Count the words in EVERY audioScript you write. If any scene exceeds the limit for its durationSeconds, shorten it or split it. This is NON-NEGOTIABLE.
 If a character has a long speech, break it into multiple scenes with natural pause points.
 
 === OUTPUT FORMAT ===
@@ -411,7 +661,7 @@ Return a JSON object:
       "id": "scene-001",
       "title": "כותרת הסצנה בעברית",
       "description": "תיאור נרטיבי מפורט בעברית — מה קורה, מה הדמויות מרגישות, מה המשמעות הדרמטית",
-      "visualPrompt": "[CHARACTER DESCRIPTIONS REPEATED HERE]. ENGLISH: Ultra-detailed shot description with camera, lighting, subject, action, environment, color, style, continuity — minimum 80 words per scene",
+      "visualPrompt": "[CHARACTER DESCRIPTIONS REPEATED HERE]. [NO SPEECH — characters must NOT move lips or appear to talk/sing]. ENGLISH: Ultra-detailed shot description with camera, lighting, subject, action, environment, color, style, continuity — minimum 80 words per scene",
       "audioScript": "(מספר:) [בקול עמוק ודרמטי] הטקסט המלא בעברית שיוקרא בקול... (דמות:) [ברגש] הדיאלוג המלא...",
       "durationSeconds": 8
     }
@@ -443,7 +693,7 @@ Return a JSON object:
       scriptData.scenes = scriptData.scenes.map(s => ({
         ...s,
         status: 'pending',
-        approved: false,
+        approved: false, continueFromPrev: true,
         // Prepend character descriptions if not already included
         visualPrompt: charDesc && !s.visualPrompt.includes(charDesc.substring(0, 30))
           ? `${charDesc}. ${s.visualPrompt}`
@@ -501,34 +751,52 @@ Return a JSON object:
   // Extract last frame from a video for visual continuity
   const extractLastFrame = async (videoUrl: string): Promise<{ data: string; mimeType: string } | null> => {
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve(null), 3000);
+      const timeout = setTimeout(() => {
+        console.warn('extractLastFrame: timed out after 15s');
+        resolve(null);
+      }, 15000);
       const video = document.createElement('video');
-      video.crossOrigin = 'anonymous';
-      video.src = videoUrl;
+      video.muted = true;
+      video.preload = 'auto';
+      // Only set crossOrigin for non-blob URLs (blob URLs are same-origin)
+      if (!videoUrl.startsWith('blob:')) {
+        video.crossOrigin = 'anonymous';
+      }
       video.onloadedmetadata = () => {
+        console.log(`extractLastFrame: metadata loaded, duration=${video.duration.toFixed(1)}s, seeking to last frame...`);
         video.currentTime = Math.max(0, video.duration - 0.1);
       };
       video.onseeked = () => {
         try {
           const canvas = document.createElement('canvas');
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
+          canvas.width = video.videoWidth || 1280;
+          canvas.height = video.videoHeight || 720;
           const ctx = canvas.getContext('2d')!;
           ctx.drawImage(video, 0, 0);
           const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
           const base64 = dataUrl.split(',')[1];
           clearTimeout(timeout);
+          console.log(`extractLastFrame: successfully extracted frame (${(base64.length / 1024).toFixed(0)}KB)`);
           resolve({ data: base64, mimeType: 'image/jpeg' });
-        } catch { clearTimeout(timeout); resolve(null); }
+        } catch (e) {
+          console.error('extractLastFrame: canvas extraction failed:', e);
+          clearTimeout(timeout);
+          resolve(null);
+        }
       };
-      video.onerror = () => { clearTimeout(timeout); resolve(null); };
+      video.onerror = (e) => {
+        console.error('extractLastFrame: video load error:', e);
+        clearTimeout(timeout);
+        resolve(null);
+      };
+      video.src = videoUrl;
+      video.load();
     });
   };
 
-  // Persist user profile to localStorage
+  // Update user profile (syncs to Supabase + localStorage via AuthContext)
   const persistUserProfile = (profile: UserProfile) => {
-    setUserProfile(profile);
-    localStorage.setItem('cinema_user', JSON.stringify(profile));
+    updateProfile(profile);
   };
 
   // Project management functions
@@ -615,7 +883,22 @@ Return a JSON object:
     // Always read from ref for latest state (critical for batch "Produce All" chaining)
     const latestScript = scriptRef.current;
     // In batch mode, skip the isProcessingVideo guard (we manage it ourselves)
-    if (!latestScript || !isApiKeySelected || (!_batchMode && isProcessingVideo)) return;
+    if (!latestScript) {
+      console.error('generateVideoForScene: no script found');
+      setError('No script loaded. Please create a script first.');
+      return;
+    }
+    if (!isApiKeySelected) {
+      console.error('generateVideoForScene: no API key selected');
+      setError('Please set your API Key first (click the key button).');
+      handleOpenKeyDialog();
+      return;
+    }
+    if (!_batchMode && isProcessingVideo) {
+      console.warn('generateVideoForScene: already processing a video');
+      setError('A video is already being generated. Please wait for it to finish.');
+      return;
+    }
 
     // Light retry for video — don't burn quota on repeated 429s
     const videoWithRetry = (fn: any) => withRetry(fn, 2, 10000);
@@ -629,6 +912,10 @@ Return a JSON object:
 
     try {
       const apiKey = getApiKey();
+      if (!apiKey) {
+        throw new Error('API Key is empty. Please enter a valid Gemini API key.');
+      }
+      console.log(`generateVideoForScene: scene ${index + 1}, apiKey=...${apiKey.slice(-6)}`);
       const ai = new GoogleGenAI({ apiKey });
       // Read previous scene from ref to get the latest videoObject (critical for chaining)
       const prevScene = index > 0 ? scriptRef.current?.scenes[index - 1] ?? null : null;
@@ -744,8 +1031,29 @@ Return a JSON object:
             }
           }
 
-          // NEVER cut audio mid-sentence. If still too long, keep full audio —
-          // video will be 8s max but audio plays completely over last frame
+          // If STILL too long after faster retry — shorten the text and regenerate
+          if (rawDuration > maxDuration + 1.0) {
+            console.warn(`TTS scene ${index + 1}: still ${rawDuration.toFixed(1)}s, shortening text by 30%...`);
+            const words = cleanTtsText.split(/\s+/);
+            const shortenedText = words.slice(0, Math.floor(words.length * 0.7)).join(' ');
+            const shortPcm = await generateTTS(`${basePrompt}. Keep under ${maxDuration} seconds:\n${shortenedText}`);
+            if (shortPcm) {
+              const shortDuration = shortPcm.length / byteRate;
+              console.log(`TTS scene ${index + 1} shortened: ${shortDuration.toFixed(1)}s`);
+              if (shortDuration < rawDuration) {
+                pcmBytes = shortPcm;
+                rawDuration = shortDuration;
+              }
+            }
+          }
+
+          // Final safety: hard-trim PCM to maxDuration so audio never exceeds video
+          if (rawDuration > maxDuration) {
+            const maxBytes = maxDuration * byteRate;
+            console.warn(`TTS scene ${index + 1}: trimming from ${rawDuration.toFixed(1)}s to ${maxDuration}s`);
+            pcmBytes = pcmBytes.slice(0, maxBytes);
+          }
+
           const wav = pcmToWav(pcmBytes);
           audioUrl = wav.url;
           (scene as any)._audioDuration = wav.duration;
@@ -758,6 +1066,10 @@ Return a JSON object:
 
       // Generate TTS for ALL selected languages and store in langMediaMap
       const langMediaMap: Record<string, { audioUrl?: string }> = {};
+      const langDurations: Record<string, number> = {}; // Track duration per language
+      const maxAudioDuration = 8; // Veo max video duration
+      const langByteRate = 24000 * 1 * 2; // sampleRate * channels * bytesPerSample
+
       for (const lang of selectedLanguages) {
         const lc = LANGUAGE_CONFIG[lang];
         try {
@@ -772,40 +1084,77 @@ Return a JSON object:
           if (lang !== 'he') {
             const tr = await withRetry(() => ai.models.generateContent({
               model: 'gemini-2.5-flash',
-              contents: [{ parts: [{ text: `Translate the following Hebrew text to ${lc.ttsLang}. Return ONLY the translated text, nothing else. Keep the emotional tone and dramatic style. Do not add explanations.\n\n${cleanText}` }] }],
+              contents: [{ parts: [{ text: `Translate the following Hebrew text to ${lc.ttsLang}. Return ONLY the translated text, nothing else. Keep the emotional tone and dramatic style. Do not add explanations. IMPORTANT: Keep it CONCISE — the result must be speakable in under ${maxAudioDuration} seconds.\n\n${cleanText}` }] }],
             }), 2, 3000);
             cleanText = tr.text?.trim() || cleanText;
           }
 
-          const langPrompt = `Read this ${lc.ttsLang} text aloud with cinematic narration style, at a brisk pace with short pauses${emoCtx ? `, with these emotions: ${emoCtx}` : ''}. Keep the total duration under 8 seconds:\n${cleanText}`;
-          const langTtsResponse = await withRetry(() => ai.models.generateContent({
-            model: "gemini-2.5-flash-preview-tts",
-            contents: [{ parts: [{ text: langPrompt }] }],
-            config: {
-              responseModalities: [Modality.AUDIO],
-              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: lc.voice } } },
-            },
-          }), 2, 3000);
+          const langBasePrompt = `Read this ${lc.ttsLang} text aloud with cinematic narration style, at a brisk pace with short pauses${emoCtx ? `, with these emotions: ${emoCtx}` : ''}`;
 
-          const langAudioPart = langTtsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-          if (langAudioPart?.data) {
-            const pcmBin = atob(langAudioPart.data);
-            let langPcm = new Uint8Array(pcmBin.length);
-            for (let j = 0; j < pcmBin.length; j++) langPcm[j] = pcmBin.charCodeAt(j);
-            // Smart-trim if over 8s
-            const byteRate = 24000 * 1 * 2;
-            if (langPcm.length / byteRate > 8) {
-              const maxBytes = Math.floor(8 * byteRate);
-              langPcm = langPcm.slice(0, maxBytes - (maxBytes % 2));
+          // First attempt: normal pace
+          let langPcm = await generateTTS(`${langBasePrompt}. Keep total duration under ${maxAudioDuration} seconds. Speak at a brisk, energetic pace:\n${cleanText}`);
+
+          if (langPcm) {
+            let langDuration = langPcm.length / langByteRate;
+            console.log(`TTS scene ${index + 1} [${lang}]: ${langDuration.toFixed(1)}s`);
+
+            // If too long (>8.5s), retry with much faster pace (same as primary language logic)
+            if (langDuration > maxAudioDuration + 0.5) {
+              console.warn(`TTS scene ${index + 1} [${lang}]: ${langDuration.toFixed(1)}s too long, retrying faster...`);
+              const fasterPcm = await generateTTS(`${langBasePrompt}. CRITICAL: You MUST finish in under ${maxAudioDuration} seconds. Speak VERY fast, rapid-fire narration pace. Do NOT pause between sentences:\n${cleanText}`);
+              if (fasterPcm) {
+                const fasterDuration = fasterPcm.length / langByteRate;
+                console.log(`TTS scene ${index + 1} [${lang}] faster retry: ${fasterDuration.toFixed(1)}s`);
+                if (fasterDuration < langDuration) {
+                  langPcm = fasterPcm;
+                  langDuration = fasterDuration;
+                }
+              }
             }
+
+            // If STILL too long — shorten the text by ~30% and regenerate
+            if (langDuration > maxAudioDuration + 1.0) {
+              console.warn(`TTS scene ${index + 1} [${lang}]: still ${langDuration.toFixed(1)}s, shortening text...`);
+              const words = cleanText.split(/\s+/);
+              const shortenedText = words.slice(0, Math.floor(words.length * 0.7)).join(' ');
+              const shortPcm = await generateTTS(`${langBasePrompt}. Keep under ${maxAudioDuration} seconds:\n${shortenedText}`);
+              if (shortPcm) {
+                const shortDuration = shortPcm.length / langByteRate;
+                console.log(`TTS scene ${index + 1} [${lang}] shortened: ${shortDuration.toFixed(1)}s`);
+                if (shortDuration < langDuration) {
+                  langPcm = shortPcm;
+                  langDuration = shortDuration;
+                }
+              }
+            }
+
+            // Absolute last resort: hard trim (only if >2s over limit)
+            if (langDuration > maxAudioDuration + 2) {
+              console.warn(`TTS scene ${index + 1} [${lang}]: LAST RESORT hard trim from ${langDuration.toFixed(1)}s to ${maxAudioDuration}s`);
+              const maxBytes = Math.floor(maxAudioDuration * langByteRate);
+              langPcm = langPcm.slice(0, maxBytes - (maxBytes % 2));
+              langDuration = langPcm.length / langByteRate;
+            }
+
             const wavResult = pcmToWav(langPcm);
             langMediaMap[lang] = { audioUrl: wavResult.url };
-            console.log(`TTS scene ${index + 1} [${lang}]: ${wavResult.duration.toFixed(1)}s`);
+            langDurations[lang] = wavResult.duration;
+            console.log(`TTS scene ${index + 1} [${lang}] final: ${wavResult.duration.toFixed(1)}s`);
           }
         } catch (langTtsErr: any) {
           console.warn(`TTS for ${lang} failed:`, langTtsErr?.message);
         }
       }
+
+      // Update _audioDuration to the MAX across all languages (primary + secondary)
+      // This ensures video duration matches the longest audio track
+      const primaryDur = (scene as any)._audioDuration as number || 0;
+      const allDurations = [primaryDur, ...Object.values(langDurations)].filter(d => d > 0);
+      if (allDurations.length > 0) {
+        (scene as any)._audioDuration = Math.max(...allDurations);
+        console.log(`Scene ${index + 1} max audio duration: ${(scene as any)._audioDuration.toFixed(1)}s (primary: ${primaryDur.toFixed(1)}s, langs: ${JSON.stringify(langDurations)})`);
+      }
+
       // Use primary language audio as main audioUrl if not already set
       if (!audioUrl && langMediaMap[selectedLanguages[0]]?.audioUrl) {
         audioUrl = langMediaMap[selectedLanguages[0]].audioUrl!;
@@ -814,26 +1163,27 @@ Return a JSON object:
       // 2. Generate Video
       let operation;
       
-      // Extract last frame from previous scene for visual continuity
-      const lastFrame = (index > 0 && prevScene?.videoUrl)
-        ? await extractLastFrame(prevScene.videoUrl) : null;
-      if (lastFrame) console.log(`Scene ${index + 1}: using last frame from scene ${index} for continuity`);
-
-      // Build reference images: slot 0 = character ASSET, slot 1 = last frame STYLE, slot 2 = extra ref STYLE
-      const referenceImagesPayload: any[] = [];
-      if (referenceImages[0]) {
-        referenceImagesPayload.push({ image: { imageBytes: referenceImages[0].data, mimeType: referenceImages[0].mimeType }, referenceType: VideoGenerationReferenceType.ASSET });
+      // Extract last frame from previous scene for visual continuity (only if user chose to continue)
+      const shouldContinue = index > 0 && prevScene?.videoUrl && prevScene?.continueFromPrev !== false;
+      if (index > 0) {
+        console.log(`Scene ${index + 1} continuity check: prevScene.videoUrl=${!!prevScene?.videoUrl}, prevScene.continueFromPrev=${prevScene?.continueFromPrev}, shouldContinue=${shouldContinue}`);
       }
+      const lastFrame = shouldContinue ? await extractLastFrame(prevScene!.videoUrl!) : null;
       if (lastFrame) {
-        referenceImagesPayload.push({ image: { imageBytes: lastFrame.data, mimeType: lastFrame.mimeType }, referenceType: VideoGenerationReferenceType.STYLE });
-      }
-      for (let i = 1; i < referenceImages.length && referenceImagesPayload.length < 3; i++) {
-        referenceImagesPayload.push({ image: { imageBytes: referenceImages[i].data, mimeType: referenceImages[i].mimeType }, referenceType: VideoGenerationReferenceType.STYLE });
+        console.log(`Scene ${index + 1}: ✅ using last frame from scene ${index} for continuity`);
+      } else if (shouldContinue) {
+        console.warn(`Scene ${index + 1}: ⚠️ last frame extraction FAILED — generating without continuity reference`);
+      } else if (index > 0) {
+        console.log(`Scene ${index + 1}: fresh scene (no last frame reference)`);
       }
 
-      // Match video duration to audio — min 5s, max 8s (Veo limits)
+      // Match video duration to audio — Veo 3.1 only accepts 4, 6, or 8 seconds
+      const VEO_VALID_DURATIONS = [4, 6, 8] as const;
       const audioDur = (scene as any)._audioDuration as number | undefined;
-      const targetDuration = audioDur ? Math.min(8, Math.max(5, Math.ceil(audioDur))) : 8;
+      // Pick the smallest valid duration that fits the audio (round up to nearest valid)
+      const targetDuration = audioDur
+        ? (VEO_VALID_DURATIONS.find(d => d >= audioDur) ?? 8)
+        : 8;
       console.log(`Video scene ${index + 1}: generating ${targetDuration}s video (audio was ${audioDur?.toFixed(1) || 'none'}s)`);
 
       const videoConfig: any = {
@@ -843,29 +1193,49 @@ Return a JSON object:
         durationSeconds: targetDuration,
       };
 
-      // Inject character lock description for maximum consistency
+      // Veo 3.1 does NOT support referenceImages (ASSET/STYLE both fail).
+      // Only two modes work:
+      //   - image-to-video: `image` param for continuing from last frame
+      //   - prompt-only: text prompt for fresh scenes
+      // Character consistency is maintained via detailed prompt description.
+      const useContinuityMode = shouldContinue && lastFrame;
+
+      // Character lock via prompt (only way to maintain consistency on Veo 3.1)
       const charLock = characterImageDescription
-        ? `[CRITICAL CHARACTER LOCK — The character in this scene MUST match this EXACT appearance in every single frame. DO NOT change any physical feature, clothing, or accessory: ${characterImageDescription}]. `
+        ? `[CHARACTER LOCK — Maintain EXACT same character appearance throughout. DO NOT change any feature: ${characterImageDescription}]. `
         : '';
-      // Add seamless transition instruction for scenes 2+
-      const transitionLock = (index > 0 && prevScene)
-        ? `[SEAMLESS CONTINUITY — This scene continues DIRECTLY from the previous scene. Maintain identical lighting, color grading, environment, and character positioning. The first frame of this scene must feel like the natural next frame of the previous scene. No jump cuts, no sudden changes.]. `
+      // Seamless transition instruction for continuity mode
+      const transitionLock = useContinuityMode
+        ? `[SEAMLESS CONTINUITY — This video MUST START from the provided reference image (the last frame of the previous scene). The FIRST FRAME must be visually identical to that image — same camera angle, same character position, same lighting. Then smoothly transition into the new action. Continuous camera shot, no jump cuts.]. `
         : '';
-      const promptText = charLock + transitionLock + (scene.visualPrompt?.trim() || scene.description?.trim() || "A cinematic scene...");
+      // Next-scene ending constraint — tell Veo how this scene should END
+      const nextScene = index < latestScript.scenes.length - 1
+        ? latestScript.scenes[index + 1]
+        : null;
+      const endingConstraint = nextScene
+        ? `[ENDING CONSTRAINT — This video MUST END in a visual state that naturally leads into the next scene. The next scene begins: "${(nextScene.description || nextScene.audioScript || '').split('.')[0].trim()}". The FINAL FRAMES should set up this transition — do NOT resolve the action completely, leave it at a point where the next scene picks up seamlessly.]. `
+        : '';
+      const noSpeechRule = '[NO SPEECH — Zero human voice/dialogue/singing. Audio = ambient sounds + background music only. Characters must NOT move lips as if speaking. All narration added separately.]. ';
+      const promptText = noSpeechRule + charLock + transitionLock + endingConstraint + (scene.visualPrompt?.trim() || scene.description?.trim() || "A cinematic scene...");
 
-      // ALWAYS send reference images for character consistency in EVERY scene
-      // We prioritize character lock over video extension because Veo doesn't
-      // support both referenceImages + video at the same time, and without
-      // reference images the character drifts (e.g. bear → mouse)
-      if (referenceImagesPayload.length > 0) {
-        videoConfig.referenceImages = referenceImagesPayload;
+      if (useContinuityMode) {
+        // Image-to-video: Veo starts from the exact last frame
+        console.log(`Scene ${index + 1}: image-to-video from last frame`);
+        operation = await videoWithRetry(() => ai.models.generateVideos({
+          model: VEO_MODEL,
+          prompt: promptText,
+          image: { imageBytes: lastFrame!.data, mimeType: lastFrame!.mimeType },
+          config: videoConfig
+        }));
+      } else {
+        // Prompt-only: fresh scene generation
+        console.log(`Scene ${index + 1}: prompt-only generation`);
+        operation = await videoWithRetry(() => ai.models.generateVideos({
+          model: VEO_MODEL,
+          prompt: promptText,
+          config: videoConfig
+        }));
       }
-
-      operation = await videoWithRetry(() => ai.models.generateVideos({
-        model: VEO_MODEL,
-        prompt: promptText,
-        config: videoConfig
-      }));
 
       // Poll for completion
       while (!operation.done) {
@@ -876,12 +1246,40 @@ Return a JSON object:
       const videoData = operation.response?.generatedVideos?.[0]?.video;
       if (!videoData?.uri) throw new Error("No video URI returned");
 
-      // Fetch the video blob
-      const videoResponse = await fetch(videoData.uri, {
+      // Fetch the video blob (try header auth first, fallback to URL param)
+      let videoResponse = await fetch(videoData.uri, {
         headers: { 'x-goog-api-key': apiKey }
       });
+      if (!videoResponse.ok) {
+        console.warn(`Video fetch with header failed (${videoResponse.status}), trying URL param...`);
+        const separator = videoData.uri.includes('?') ? '&' : '?';
+        videoResponse = await fetch(`${videoData.uri}${separator}key=${apiKey}`);
+      }
+      if (!videoResponse.ok) {
+        throw new Error(`Failed to download video: HTTP ${videoResponse.status}`);
+      }
       const blob = await videoResponse.blob();
       const url = URL.createObjectURL(blob);
+
+      // Persist video blob to IndexedDB so it survives page refresh
+      const sceneId = scene.id;
+      try {
+        await saveMediaBlob(`video_${sceneId}`, blob);
+        // Also persist audio blobs
+        if (audioUrl) {
+          const audioBlob = await fetch(audioUrl).then(r => r.blob());
+          await saveMediaBlob(`audio_${sceneId}_primary`, audioBlob);
+        }
+        for (const [lang, media] of Object.entries(langMediaMap)) {
+          if (media.audioUrl) {
+            const aBlob = await fetch(media.audioUrl).then(r => r.blob());
+            await saveMediaBlob(`audio_${sceneId}_${lang}`, aBlob);
+          }
+        }
+        console.log(`Scene ${index + 1}: media saved to IndexedDB`);
+      } catch (e) {
+        console.warn('Failed to persist media to IndexedDB:', e);
+      }
 
       // Use ref for latest state to avoid stale closure
       const currentScript = scriptRef.current!;
@@ -943,7 +1341,19 @@ Return a JSON object:
   // Produce the next eligible scene (first pending scene whose previous is approved, or scene 0)
   const produceNextScene = async () => {
     const latestScript = scriptRef.current;
-    if (!latestScript || !isApiKeySelected || isGeneratingAll || isProcessingVideo) return;
+    if (!latestScript) {
+      setError('No script loaded. Please create a script first.');
+      return;
+    }
+    if (!isApiKeySelected) {
+      setError('Please set your API Key first (click the key button).');
+      handleOpenKeyDialog();
+      return;
+    }
+    if (isGeneratingAll || isProcessingVideo) {
+      setError('A video is already being generated. Please wait.');
+      return;
+    }
 
     // Find the next scene that can be produced
     let nextIndex = -1;
@@ -989,7 +1399,8 @@ Return a JSON object:
       audioScript: "Enter the dialogue or narration here...",
       durationSeconds: 8,
       status: 'pending',
-      approved: false
+      approved: false,
+      continueFromPrev: true,
     };
 
     if (script) {
@@ -1027,10 +1438,25 @@ Return a JSON object:
     );
   };
 
-  const approveScene = (id: string) => {
+  // State for showing last-frame preview when approving a scene
+  const [lastFramePreview, setLastFramePreview] = useState<{ sceneId: string; imageUrl: string } | null>(null);
+
+  const showApprovePreview = async (scene: Scene) => {
+    if (!scene.videoUrl) return;
+    const frame = await extractLastFrame(scene.videoUrl);
+    if (frame) {
+      setLastFramePreview({ sceneId: scene.id, imageUrl: `data:${frame.mimeType};base64,${frame.data}` });
+    } else {
+      // Fallback: approve immediately if frame extraction fails
+      approveScene(scene.id);
+    }
+  };
+
+  const approveScene = (id: string, continueFromPrev = true) => {
     if (!script) return;
-    const updatedScenes = script.scenes.map(s => s.id === id ? { ...s, approved: true } : s);
+    const updatedScenes = script.scenes.map(s => s.id === id ? { ...s, approved: true, continueFromPrev } : s);
     setScript({ ...script, scenes: updatedScenes });
+    setLastFramePreview(null);
   };
 
   const downloadSceneVideo = (scene: Scene, lang?: string) => {
@@ -1071,7 +1497,7 @@ Return a JSON object:
 
     setExportStatus('loading-ffmpeg');
     setExportProgress(0);
-    setExportProgressMsg('Loading video engine...');
+    setExportProgressMsg(T('loadingEngine'));
     if (exportUrl) { URL.revokeObjectURL(exportUrl); setExportUrl(null); }
 
     try {
@@ -1102,7 +1528,7 @@ Return a JSON object:
       for (let i = 0; i < completedScenes.length; i++) {
         const scene = completedScenes[i];
         const sceneNum = String(i).padStart(3, '0');
-        setExportProgressMsg(`Processing scene ${i + 1}/${completedScenes.length}...`);
+        setExportProgressMsg(`${T('processingSceneN')} ${i + 1}/${completedScenes.length}...`);
         setExportProgress(Math.round((i / completedScenes.length) * 80));
 
         // Get audio URL for selected language
@@ -1117,11 +1543,13 @@ Return a JSON object:
           const audioBlob = await fetch(audioUrl).then(r => r.blob());
           await ffmpeg.writeFile(`scene_${sceneNum}.wav`, await fetchFile(audioBlob));
 
-          // Mux video + audio → MP4 (do NOT use -shortest — let full audio play,
-          // video's last frame will freeze if audio is longer)
+          // Mux video + TTS audio → MP4
+          // Use -map to explicitly: take VIDEO from Veo (strip Veo's built-in music),
+          // take AUDIO from TTS narration only. This ensures consistent audio across scenes.
           await ffmpeg.exec([
             '-i', `scene_${sceneNum}.webm`,
             '-i', `scene_${sceneNum}.wav`,
+            '-map', '0:v:0', '-map', '1:a:0',
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
             '-movflags', '+faststart',
@@ -1149,22 +1577,45 @@ Return a JSON object:
       }
 
       // 3. Create concat file list
-      setExportProgressMsg('Merging scenes...');
+      setExportProgressMsg(T('mergingScenes'));
       setExportProgress(85);
       const concatList = clipFiles.map(f => `file '${f}'`).join('\n');
       await ffmpeg.writeFile('filelist.txt', concatList);
 
       // 4. Concat all clips into final movie
+      const concatOutput = bgMusicFile ? 'concat_only.mp4' : 'output.mp4';
       await ffmpeg.exec([
         '-f', 'concat', '-safe', '0',
         '-i', 'filelist.txt',
         '-c', 'copy',
         '-movflags', '+faststart',
-        'output.mp4'
+        concatOutput
       ]);
 
+      // 4b. Mix background music if provided
+      if (bgMusicFile) {
+        setExportProgressMsg('Mixing background music...');
+        setExportProgress(90);
+        await ffmpeg.writeFile('bgmusic.mp3', await fetchFile(bgMusicFile));
+        // Mix: keep narration at full volume, background music at user-selected volume
+        // -shortest ensures music doesn't extend past video
+        const musicVol = bgMusicVolume.toFixed(2);
+        await ffmpeg.exec([
+          '-i', 'concat_only.mp4',
+          '-i', 'bgmusic.mp3',
+          '-filter_complex', `[1:a]volume=${musicVol}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]`,
+          '-map', '0:v', '-map', '[out]',
+          '-c:v', 'copy',
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart',
+          'output.mp4'
+        ]);
+        try { await ffmpeg.deleteFile('concat_only.mp4'); } catch {}
+        try { await ffmpeg.deleteFile('bgmusic.mp3'); } catch {}
+      }
+
       // 5. Read output and create download URL
-      setExportProgressMsg('Preparing download...');
+      setExportProgressMsg(T('preparingDownload'));
       setExportProgress(95);
       const outputData = await ffmpeg.readFile('output.mp4');
       const outputBlob = new Blob([outputData], { type: 'video/mp4' });
@@ -1180,11 +1631,11 @@ Return a JSON object:
 
       setExportStatus('done');
       setExportProgress(100);
-      setExportProgressMsg('Ready!');
+      setExportProgressMsg(T('ready'));
     } catch (err: any) {
       console.error('Export failed:', err);
       setExportStatus('error');
-      setExportProgressMsg(err.message || 'Export failed');
+      setExportProgressMsg(err.message || T('exportFailed'));
     }
   };
 
@@ -1199,29 +1650,29 @@ Return a JSON object:
   };
 
   const WIZARD_STEPS: { key: WizardStep; label: string; icon: React.ReactNode }[] = [
-    { key: 'projects', label: 'Projects', icon: <Folder className="w-4 h-4" /> },
-    { key: 'story', label: 'Story', icon: <Wand2 className="w-4 h-4" /> },
-    { key: 'style', label: 'Style', icon: <Palette className="w-4 h-4" /> },
-    { key: 'language', label: 'Language', icon: <Globe className="w-4 h-4" /> },
-    { key: 'timeline', label: 'Timeline', icon: <Clock className="w-4 h-4" /> },
-    { key: 'preview', label: 'Preview', icon: <Play className="w-4 h-4" /> },
-    { key: 'pricing', label: 'Pricing', icon: <Crown className="w-4 h-4" /> },
+    { key: 'projects', label: T('navProjects'), icon: <Folder className="w-4 h-4" /> },
+    { key: 'story', label: T('navStory'), icon: <Wand2 className="w-4 h-4" /> },
+    { key: 'style', label: T('navStyle'), icon: <Palette className="w-4 h-4" /> },
+    { key: 'language', label: T('navLanguage'), icon: <Globe className="w-4 h-4" /> },
+    { key: 'timeline', label: T('navTimeline'), icon: <Clock className="w-4 h-4" /> },
+    { key: 'preview', label: T('navPreview'), icon: <Play className="w-4 h-4" /> },
+    { key: 'pricing', label: T('navPricing'), icon: <Crown className="w-4 h-4" /> },
   ];
 
   const styles: { name: MovieStyle; icon: React.ReactNode; color: string; description: string }[] = [
-    { name: 'Pixar', icon: <Clapperboard className="w-4 h-4" />, color: 'from-blue-500 to-cyan-500', description: '3D animated charm' },
+    { name: 'Pixar', icon: <Clapperboard className="w-4 h-4" />, color: 'from-emerald-500 to-cyan-500', description: '3D animated charm' },
     { name: 'Realistic', icon: <Film className="w-4 h-4" />, color: 'from-emerald-500 to-teal-500', description: 'Cinematic realism' },
     { name: 'Paper Folding', icon: <Palette className="w-4 h-4" />, color: 'from-orange-500 to-amber-500', description: 'Stop-motion origami' },
-    { name: 'Cyberpunk', icon: <Sparkles className="w-4 h-4" />, color: 'from-purple-500 to-pink-500', description: 'Neon-lit future' },
+    { name: 'Cyberpunk', icon: <Sparkles className="w-4 h-4" />, color: 'from-teal-500 to-pink-500', description: 'Neon-lit future' },
     { name: 'Hand-drawn', icon: <Wand2 className="w-4 h-4" />, color: 'from-rose-500 to-red-500', description: 'Classic 2D artistry' },
   ];
 
   return (
-    <div className="min-h-screen text-white font-sans selection:bg-blue-500/30 overflow-x-hidden" style={{ background: 'var(--bg-primary)' }}>
+    <div className="min-h-screen text-white font-sans selection:bg-emerald-500/30 overflow-x-hidden" style={{ background: 'var(--bg-primary)' }}>
       {/* Background Glow - subtle */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-[30%] -left-[15%] w-[60%] h-[60%] bg-blue-600/[0.06] blur-[150px] rounded-full" />
-        <div className="absolute -bottom-[30%] -right-[15%] w-[60%] h-[60%] bg-indigo-600/[0.06] blur-[150px] rounded-full" />
+        <div className="absolute -top-[30%] -left-[15%] w-[60%] h-[60%] bg-emerald-600/[0.06] blur-[150px] rounded-full" />
+        <div className="absolute -bottom-[30%] -right-[15%] w-[60%] h-[60%] bg-teal-600/[0.06] blur-[150px] rounded-full" />
       </div>
 
       {/* HEADER */}
@@ -1229,14 +1680,14 @@ Return a JSON object:
         <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
           {/* Logo */}
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 bg-gradient-to-br from-[--accent] to-indigo-500 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
+            <div className="w-8 h-8 bg-gradient-to-br from-[--accent] to-teal-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20">
               <Film className="w-4 h-4 text-white" />
             </div>
-            <span className="font-bold text-sm tracking-tight hidden sm:block">Cinematic Studio</span>
+            <span className="font-bold text-sm tracking-tight hidden sm:block">{T('appTitle')}</span>
           </div>
 
-          {/* Step Indicator */}
-          <div className="flex items-center gap-1">
+          {/* Step Indicator — desktop only */}
+          <div className="hidden sm:flex items-center gap-1">
             {WIZARD_STEPS.map((step, i) => (
               <button
                 key={step.key}
@@ -1249,49 +1700,150 @@ Return a JSON object:
                 {wizardStep === step.key && (
                   <motion.div layoutId="step-pill" className="absolute inset-0 bg-[--accent-soft] border border-[--accent]/30 rounded-full" />
                 )}
-                <span className="relative z-10 hidden sm:inline">{step.icon}</span>
+                <span className="relative z-10">{step.icon}</span>
                 <span className="relative z-10">{step.label}</span>
               </button>
             ))}
           </div>
 
-          {/* Status & Credits */}
-          <div className="flex items-center gap-2">
-            {/* Cost tracker */}
+          {/* Desktop: Status & Credits */}
+          <div className="hidden sm:flex items-center gap-2">
             {script && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[--bg-card] border border-[--border-subtle] rounded-lg text-xs" title="Estimated cost this session">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[--bg-card] border border-[--border-subtle] rounded-lg text-xs" title={T('estimatedCost')}>
                 <DollarSign className="w-3 h-3 text-[--success]" />
                 <span className="font-mono font-bold text-[--success]">${totalSpent.toFixed(2)}</span>
-                <span className="text-[--text-muted] hidden sm:inline">/ ~${(script.scenes.length * SCENE_COST).toFixed(2)} total</span>
+                <span className="text-[--text-muted]">/ ~${(script.scenes.length * SCENE_COST).toFixed(2)} total</span>
               </div>
             )}
-            {/* Wallet / Credits */}
             <button onClick={() => setWizardStep('pricing')}
               className="px-2.5 py-1.5 bg-[--bg-card] border border-[--border-subtle] rounded-lg text-xs font-medium transition-all hover:bg-[--bg-card-hover]"
-              title="View plans & credits">
+              title={T('viewPlans')}>
               {userProfile.plan === 'free'
-                ? <span>&#9889; Free ({2 - userProfile.scenesUsed} scenes)</span>
-                : <span>&#127916; {PLAN_CONFIG[userProfile.plan].films} films left</span>
+                ? <span>&#9889; Free ({2 - userProfile.scenesUsed} {T('scenesLeft')})</span>
+                : <span>&#127916; {PLAN_CONFIG[userProfile.plan].films} {T('filmsLeft')}</span>
               }
             </button>
             <button onClick={() => { setApiKeyDraft(customApiKey); setShowApiKeyInput(true); }}
               className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all",
                 isApiKeySelected
                   ? "bg-white border-[--border-subtle] text-black"
-                  : "bg-[--warning-soft] text-black border-[--warning]/20"
+                  : "bg-[--warning-soft] text-black border-[--warning]/20 animate-pulse"
               )}
               title={isApiKeySelected ? `API Key: ...${getApiKey().slice(-6)}` : 'Set API Key'}>
-              <Settings className="w-3.5 h-3.5 inline mr-1" />{isApiKeySelected ? 'Key' : 'Connect'}
+              <Settings className="w-3.5 h-3.5 inline mr-1" />{isApiKeySelected ? T('key') : T('connect')}
             </button>
-            {/* Profile avatar */}
-            <button onClick={() => setShowProfile(true)}
+            {/* Language Selector */}
+            <div className="relative">
+              <button onClick={() => setShowLangDropdown(!showLangDropdown)}
+                className="w-8 h-8 bg-[--bg-card] border border-[--border-subtle] rounded-full flex items-center justify-center hover:bg-[--bg-card-hover] transition-all text-sm"
+                title={T('uiLanguage')}>
+                {UI_LANGUAGES.find(l => l.code === uiLang)?.flag || '🌐'}
+              </button>
+              {showLangDropdown && (
+                <>
+                  <div className="fixed inset-0 z-[90]" onClick={() => setShowLangDropdown(false)} />
+                  <div className="absolute right-0 top-10 bg-[--bg-elevated] border border-[--border-subtle] rounded-xl shadow-2xl z-[91] py-1 w-44 max-h-80 overflow-y-auto">
+                    {UI_LANGUAGES.map(lang => (
+                      <button key={lang.code} onClick={() => { setUiLang(lang.code); setShowLangDropdown(false); }}
+                        className={cn("w-full px-3 py-2 text-left text-xs flex items-center gap-2 hover:bg-white/10 transition-all",
+                          uiLang === lang.code ? "bg-[--accent-soft] text-[--accent] font-bold" : "text-[--text-secondary]")}>
+                        <span className="text-base">{lang.flag}</span>
+                        <span>{lang.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+            <a href="#/profile"
               className="w-8 h-8 bg-[--bg-card] border border-[--border-subtle] rounded-full flex items-center justify-center hover:bg-[--bg-card-hover] transition-all"
-              title="Profile">
+              title={T('profileTitle')}>
               <User className="w-3.5 h-3.5 text-[--text-muted]" />
-            </button>
+            </a>
             <div className={cn("w-2 h-2 rounded-full", isApiKeySelected ? "bg-[--success] animate-pulse" : "bg-[--warning]")} />
           </div>
+
+          {/* Mobile: status dot + hamburger */}
+          <div className="flex sm:hidden items-center gap-3">
+            <div className={cn("w-2.5 h-2.5 rounded-full", isApiKeySelected ? "bg-[--success] animate-pulse" : "bg-[--warning] animate-pulse")} />
+            <button onClick={() => setShowMobileMenu(!showMobileMenu)}
+              className="w-10 h-10 flex items-center justify-center rounded-xl bg-[--bg-card] border border-[--border-subtle] hover:bg-[--bg-card-hover] transition-all">
+              {showMobileMenu ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          </div>
         </div>
+
+        {/* Mobile Hamburger Menu */}
+        <AnimatePresence>
+          {showMobileMenu && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="sm:hidden overflow-hidden border-t border-[--border-subtle]"
+            >
+              <div className="p-4 space-y-2">
+                {/* API Key — prominent */}
+                <button onClick={() => { setApiKeyDraft(customApiKey); setShowApiKeyInput(true); setShowMobileMenu(false); }}
+                  className={cn("w-full flex items-center gap-3 p-3.5 rounded-xl text-sm font-bold transition-all",
+                    isApiKeySelected
+                      ? "bg-[--accent-soft] border border-[--accent]/30 text-[--accent]"
+                      : "bg-[--warning-soft] border border-[--warning]/30 text-[--warning] animate-pulse"
+                  )}>
+                  <Settings className="w-5 h-5" />
+                  {isApiKeySelected ? `🔑 API Key (...${getApiKey().slice(-6)})` : `⚠️ ${T('connect')} API Key`}
+                </button>
+
+                {/* Wallet / Credits */}
+                <button onClick={() => { setWizardStep('pricing'); setShowMobileMenu(false); }}
+                  className="w-full flex items-center gap-3 p-3.5 rounded-xl text-sm font-medium bg-[--bg-card] border border-[--border-subtle] hover:bg-[--bg-card-hover] transition-all">
+                  <Coins className="w-5 h-5 text-[--warning]" />
+                  {userProfile.plan === 'free'
+                    ? <span>&#9889; Free — {2 - userProfile.scenesUsed} {T('scenesLeft')}</span>
+                    : <span>&#127916; {PLAN_CONFIG[userProfile.plan].films} {T('filmsLeft')}</span>
+                  }
+                </button>
+
+                {/* Cost tracker */}
+                {script && (
+                  <div className="flex items-center gap-3 p-3.5 rounded-xl text-sm bg-[--bg-card] border border-[--border-subtle]">
+                    <DollarSign className="w-5 h-5 text-[--success]" />
+                    <span className="font-mono font-bold text-[--success]">${totalSpent.toFixed(2)}</span>
+                    <span className="text-[--text-muted]">/ ~${(script.scenes.length * SCENE_COST).toFixed(2)}</span>
+                  </div>
+                )}
+
+                {/* Profile */}
+                <a href="#/profile"
+                  className="w-full flex items-center gap-3 p-3.5 rounded-xl text-sm font-medium bg-[--bg-card] border border-[--border-subtle] hover:bg-[--bg-card-hover] transition-all">
+                  <User className="w-5 h-5 text-[--text-secondary]" />
+                  {T('profileTitle')}
+                </a>
+
+                {/* Language */}
+                <div className="flex flex-wrap gap-2 p-3.5 rounded-xl bg-[--bg-card] border border-[--border-subtle]">
+                  <Globe className="w-5 h-5 text-[--text-secondary]" />
+                  {UI_LANGUAGES.map(lang => (
+                    <button key={lang.code} onClick={() => { setUiLang(lang.code); }}
+                      className={cn("px-2.5 py-1 rounded-lg text-xs font-medium transition-all",
+                        uiLang === lang.code ? "bg-[--accent-soft] text-[--accent] font-bold" : "text-[--text-muted] hover:text-white")}>
+                      {lang.flag}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Back to landing */}
+                <a href="#/"
+                  onClick={() => setShowMobileMenu(false)}
+                  className="w-full flex items-center gap-3 p-3.5 rounded-xl text-sm font-medium bg-[--bg-card] border border-[--border-subtle] hover:bg-[--bg-card-hover] transition-all text-[--text-secondary]">
+                  <ArrowLeft className="w-5 h-5" />
+                  {T('backToHome') || 'Back to Home'}
+                </a>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </header>
 
       {/* Error Banner */}
@@ -1321,17 +1873,17 @@ Return a JSON object:
             <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
               className="bg-[--bg-elevated] border border-[--border-subtle] rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
               <div className="flex items-center justify-between">
-                <h3 className="font-bold text-lg">API Key</h3>
+                <h3 className="font-bold text-lg">{T('apiKeyTitle')}</h3>
                 <button onClick={() => setShowApiKeyInput(false)} className="p-1.5 hover:bg-white/10 rounded-lg">
                   <X className="w-4 h-4" />
                 </button>
               </div>
               <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
-                className="flex items-center justify-center gap-2 w-full py-3 bg-blue-600/20 border border-blue-500/50 text-blue-300 rounded-xl text-sm font-bold hover:bg-blue-600/30 transition-all">
-                &#128273; Get your free API key at Google AI Studio &rarr;
+                className="flex items-center justify-center gap-2 w-full py-3 bg-emerald-600/20 border border-emerald-500/50 text-emerald-300 rounded-xl text-sm font-bold hover:bg-emerald-600/30 transition-all">
+                &#128273; {T('getApiKey')} &rarr; Google AI Studio
               </a>
               <p className="text-xs text-[--text-muted] leading-relaxed">
-                Enter your Google AI Studio API key. The key is saved locally in your browser.
+                {T('apiKeyHelp')}
               </p>
               <input type="password" value={apiKeyDraft} onChange={(e) => setApiKeyDraft(e.target.value)}
                 placeholder="AIza..."
@@ -1340,18 +1892,18 @@ Return a JSON object:
               />
               {customApiKey && (
                 <p className="text-[10px] text-[--success] flex items-center gap-1">
-                  <CheckCircle2 className="w-3 h-3" /> Active key: ...{customApiKey.slice(-6)}
+                  <CheckCircle2 className="w-3 h-3" /> {T('activeKey')}: ...{customApiKey.slice(-6)}
                 </p>
               )}
               <div className="flex items-center gap-2">
                 <button onClick={saveApiKey}
-                  className="flex-1 py-2.5 bg-[--accent] hover:bg-blue-500 rounded-xl text-sm font-bold transition-all">
-                  Save
+                  className="flex-1 py-2.5 bg-[--accent] hover:bg-emerald-500 rounded-xl text-sm font-bold transition-all">
+                  {T('save')}
                 </button>
                 {customApiKey && (
                   <button onClick={() => { setApiKeyDraft(''); setCustomApiKey(''); localStorage.removeItem('gemini_api_key'); setIsApiKeySelected(!!(process.env.API_KEY || process.env.GEMINI_API_KEY)); setShowApiKeyInput(false); }}
                     className="py-2.5 px-4 bg-[--danger-soft] text-[--danger] rounded-xl text-sm font-medium transition-all">
-                    Clear
+                    {T('remove')}
                   </button>
                 )}
               </div>
@@ -1361,43 +1913,46 @@ Return a JSON object:
       </AnimatePresence>
 
       {/* Profile Modal */}
+      {/* Profile modal removed — now at #/profile page */}
+
+      {/* Last Frame Approval Modal */}
       <AnimatePresence>
-        {showProfile && (
+        {lastFramePreview && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
-            onClick={(e) => { if (e.target === e.currentTarget) setShowProfile(false); }}>
-            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-[--bg-elevated] border border-[--border-subtle] rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[110] flex items-center justify-center p-4"
+            onClick={(e) => { if (e.target === e.currentTarget) setLastFramePreview(null); }}>
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-[--bg-elevated] border border-[--border-subtle] rounded-2xl p-5 max-w-lg w-full space-y-4 shadow-2xl">
               <div className="flex items-center justify-between">
-                <h3 className="font-bold text-lg flex items-center gap-2"><User className="w-5 h-5" /> Profile</h3>
-                <button onClick={() => setShowProfile(false)} className="p-1.5 hover:bg-white/10 rounded-lg"><X className="w-4 h-4" /></button>
+                <h3 className="font-bold text-base">📸 {T('lastFrameTitle')}</h3>
+                <button onClick={() => setLastFramePreview(null)} className="p-1.5 hover:bg-white/10 rounded-lg"><X className="w-4 h-4" /></button>
               </div>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider block mb-1">Name</label>
-                  <input value={userProfile.name} onChange={(e) => persistUserProfile({ ...userProfile, name: e.target.value })}
-                    className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm focus:outline-none focus:border-[--accent]/50 placeholder:text-[--text-muted]"
-                    placeholder="Your name" />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider block mb-1">Email</label>
-                  <input value={userProfile.email} onChange={(e) => persistUserProfile({ ...userProfile, email: e.target.value })}
-                    className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm focus:outline-none focus:border-[--accent]/50 placeholder:text-[--text-muted]"
-                    placeholder="your@email.com" type="email" />
-                </div>
-                <div className="p-4 bg-[--bg-card] border border-[--border-subtle] rounded-xl">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Current Plan</span>
-                    <span className="text-sm font-bold text-[--accent]">{PLAN_CONFIG[userProfile.plan].label}</span>
-                  </div>
-                  <p className="text-xs text-[--text-muted] mt-1">{PLAN_CONFIG[userProfile.plan].desc}</p>
-                  <p className="text-xs text-[--text-muted] mt-1">Scenes used: {userProfile.scenesUsed}</p>
-                  <button onClick={() => { setShowProfile(false); setWizardStep('pricing'); }}
-                    className="mt-3 w-full py-2 bg-[--accent-soft] text-[--accent] rounded-lg text-xs font-bold hover:bg-[--accent-soft]/80 transition-all">
-                    Change Plan
-                  </button>
-                </div>
+              <div className="rounded-xl overflow-hidden border border-[--border-subtle]">
+                <img src={lastFramePreview.imageUrl} alt="Last frame" className="w-full aspect-video object-cover" />
               </div>
+              <p className="text-xs text-[--text-muted] text-center">
+                {T('chooseHowStart')}
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                  onClick={() => approveScene(lastFramePreview.sceneId, true)}
+                  className="py-3 px-4 bg-emerald-500 text-white rounded-xl text-sm font-bold hover:bg-emerald-400 transition-all flex flex-col items-center gap-1.5 border-2 border-emerald-400/50 shadow-lg shadow-emerald-500/25">
+                  <ArrowRight className="w-5 h-5" />
+                  <span>{T('continueFrame')}</span>
+                  <span className="text-[10px] font-normal opacity-70">{T('seamlessTransition')}</span>
+                </motion.button>
+                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                  onClick={() => approveScene(lastFramePreview.sceneId, false)}
+                  className="py-3 px-4 bg-transparent text-white rounded-xl text-sm font-bold hover:bg-white/10 transition-all flex flex-col items-center gap-1.5 border-2 border-emerald-400/50">
+                  <Sparkles className="w-5 h-5" />
+                  <span>{T('freshScene')}</span>
+                  <span className="text-[10px] font-normal opacity-70">{T('newAngle')}</span>
+                </motion.button>
+              </div>
+              <button onClick={() => setLastFramePreview(null)}
+                className="w-full py-2 text-xs text-[--text-muted] hover:text-[--text-secondary] transition-all">
+                {T('cancel')}
+              </button>
             </motion.div>
           </motion.div>
         )}
@@ -1411,23 +1966,23 @@ Return a JSON object:
           {wizardStep === 'projects' && (
             <motion.div key="projects" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-3xl mx-auto space-y-6">
               <div className="text-center space-y-2">
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Your Projects</h1>
-                <p className="text-sm text-[--text-muted]">Continue a previous project or start a new one</p>
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{T('yourProjects')}</h1>
+                <p className="text-sm text-[--text-muted]">{T('continueOrStart')}</p>
               </div>
 
               <div className="flex justify-center">
                 <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                   onClick={newProject}
-                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-blue-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20">
-                  <Plus className="w-4 h-4" /> New Project
+                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-emerald-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-emerald-500/20">
+                  <Plus className="w-4 h-4" /> {T('newProject')}
                 </motion.button>
               </div>
 
               {projects.length === 0 ? (
                 <div className="h-48 flex flex-col items-center justify-center border border-dashed border-[--border-subtle] rounded-2xl text-[--text-muted]">
                   <Folder className="w-10 h-10 mb-3 opacity-30" />
-                  <p className="text-sm font-medium">No saved projects</p>
-                  <p className="text-xs mt-1">Create your first movie project above</p>
+                  <p className="text-sm font-medium">{T('noSavedProjects')}</p>
+                  <p className="text-xs mt-1">{T('createFirstProject')}</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1436,17 +1991,17 @@ Return a JSON object:
                       className={cn(
                         "p-4 rounded-2xl border transition-all",
                         currentProjectId === project.id
-                          ? "bg-blue-600/20 border-blue-500/50"
+                          ? "bg-emerald-600/20 border-emerald-500/50"
                           : "bg-[--bg-card] border-[--border-subtle] hover:bg-[--bg-card-hover]"
                       )}>
                       <h3 className="font-semibold text-sm truncate">{project.name}</h3>
                       <p className="text-xs text-[--text-muted] mt-1">
-                        {new Date(project.updatedAt).toLocaleDateString()} | {project.script?.scenes.length || 0} scenes | {project.style}
+                        {new Date(project.updatedAt).toLocaleDateString()} | {project.script?.scenes.length || 0} {T('scenes')} | {project.style}
                       </p>
                       <div className="flex items-center gap-2 mt-3">
                         <button onClick={() => loadProject(project)}
                           className="flex-1 py-2 bg-[--accent-soft] text-[--accent] rounded-lg text-xs font-bold hover:bg-[--accent-soft]/80 transition-all">
-                          Continue
+                          {T('continueBtn')}
                         </button>
                         <button onClick={() => deleteProject(project.id)}
                           className="py-2 px-3 bg-[--danger-soft] text-[--danger] rounded-lg text-xs font-medium hover:bg-[--danger-soft]/80 transition-all">
@@ -1464,33 +2019,33 @@ Return a JSON object:
           {wizardStep === 'story' && (
             <motion.div key="story" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-2xl mx-auto space-y-6">
               <div className="text-center space-y-2">
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Tell your story</h1>
-                <p className="text-sm text-[--text-muted]">Paste a book excerpt, script, or describe your movie idea</p>
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{T('tellStory')}</h1>
+                <p className="text-sm text-[--text-muted]">{T('storySubtitle')}</p>
               </div>
 
               {/* Mode Selectors — dropdowns, simple style */}
               <div className="flex items-center justify-center gap-4 flex-wrap">
                 <div className="flex items-center gap-2">
-                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Style:</label>
+                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">{T('styleLabel')}</label>
                   <select value={beCreative ? 'creative' : 'strict'} onChange={(e) => setBeCreative(e.target.value === 'creative')}
                     className="bg-[--bg-card] border border-[--border-subtle] rounded-xl px-3 py-2 text-xs font-medium text-[--text-primary] focus:outline-none focus:border-[--accent]/40 cursor-pointer [&>option]:bg-gray-900 [&>option]:text-white">
-                    <option value="creative">✨ Creative — AI enriches with cinematic depth</option>
-                    <option value="strict">📐 Strict — follows your text word for word</option>
+                    <option value="creative">{T('creativeOption')}</option>
+                    <option value="strict">{T('strictOption')}</option>
                   </select>
                 </div>
                 <div className="flex items-center gap-2">
-                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Input:</label>
+                  <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">{T('inputLabel')}</label>
                   <select value={isManualMode ? 'manual' : 'ai'} onChange={(e) => setIsManualMode(e.target.value === 'manual')}
                     className="bg-[--bg-card] border border-[--border-subtle] rounded-xl px-3 py-2 text-xs font-medium text-[--text-primary] focus:outline-none focus:border-[--accent]/40 cursor-pointer [&>option]:bg-gray-900 [&>option]:text-white">
-                    <option value="ai">🤖 AI — describe an idea, AI builds the script</option>
-                    <option value="manual">📖 Text — paste a book/script, AI splits to scenes</option>
+                    <option value="ai">{T('aiOption')}</option>
+                    <option value="manual">{T('manualOption')}</option>
                   </select>
                 </div>
               </div>
 
               {/* Script Model Selector — also simple dropdown */}
               <div className="flex items-center justify-center gap-2">
-                <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Model:</label>
+                <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">{T('modelLabel')}</label>
                 <select value={scriptModel} onChange={(e) => setScriptModel(e.target.value)}
                   className="bg-[--bg-card] border border-[--border-subtle] rounded-xl px-3 py-2 text-xs font-medium text-[--text-primary] focus:outline-none focus:border-[--accent]/40 cursor-pointer [&>option]:bg-gray-900 [&>option]:text-white">
                   {SCRIPT_MODELS.map(m => (
@@ -1506,21 +2061,21 @@ Return a JSON object:
                 const selectedScenes = est[movieLength];
                 return (
                   <div className="space-y-2">
-                    <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider text-center block">Movie Length</label>
+                    <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider text-center block">{T('movieLength')}</label>
                     <div className="flex items-center justify-center gap-2">
                       {(Object.entries(MOVIE_LENGTH_LABELS) as [MovieLength, typeof MOVIE_LENGTH_LABELS['short']][]).map(([key, config]) => (
                         <button key={key} onClick={() => setMovieLength(key)}
                           className={cn(
                             "flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 text-sm font-medium transition-all",
                             movieLength === key
-                              ? "bg-blue-600/20 border-blue-500/50 text-blue-300 shadow-lg shadow-blue-500/20 scale-105"
+                              ? "bg-emerald-600/20 border-emerald-500/50 text-emerald-300 shadow-lg shadow-emerald-500/20 scale-105"
                               : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
                           )}>
                           <span>{config.icon}</span>
                           <div className="text-left">
-                            <span className="block text-xs font-bold">{config.labelHe}</span>
+                            <span className="block text-xs font-bold">{T(key + 'Label')}</span>
                             <span className="block text-[10px] opacity-70">
-                              {wordCount > 0 ? `~${est[key]} scenes` : config.desc}
+                              {wordCount > 0 ? `~${est[key]} ${T('scenes')}` : T(key + 'Desc')}
                             </span>
                           </div>
                         </button>
@@ -1528,7 +2083,7 @@ Return a JSON object:
                     </div>
                     {wordCount > 0 && (
                       <p className="text-[10px] text-[--text-muted] text-center">
-                        {wordCount} words → ~{selectedScenes} scenes → Est. ~${(selectedScenes * SCENE_COST).toFixed(2)} USD
+                        {wordCount} {T('wordCount')} → ~{selectedScenes} {T('estScenes')} → {T('estCost')} ~${(selectedScenes * SCENE_COST).toFixed(2)} USD
                       </p>
                     )}
                   </div>
@@ -1538,11 +2093,11 @@ Return a JSON object:
               {/* Textarea */}
               <div className="relative group">
                 <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)}
-                  placeholder={isManualMode ? "Paste your full script or book excerpt here..." : "Describe your movie idea..."}
+                  placeholder={isManualMode ? T('pasteScript') : T('describeIdea')}
                   className="w-full min-h-48 sm:min-h-56 bg-[--bg-card] border border-[--border-subtle] rounded-2xl p-5 text-sm text-[--text-primary] focus:outline-none focus:ring-2 focus:ring-[--accent]/20 focus:border-[--accent]/40 transition-all resize-y placeholder:text-[--text-muted] leading-relaxed overflow-y-auto"
                 />
                 <div className="absolute bottom-4 right-4 text-xs text-[--text-muted] font-medium">
-                  {prompt.length > 0 ? `${prompt.split(/\s+/).filter(Boolean).length} words` : ''}
+                  {prompt.length > 0 ? `${prompt.split(/\s+/).filter(Boolean).length} ${T('wordCount')}` : ''}
                 </div>
               </div>
 
@@ -1551,8 +2106,8 @@ Return a JSON object:
                 <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                   onClick={() => setWizardStep('style')}
                   disabled={!prompt.trim()}
-                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20">
-                  Next <ArrowRight className="w-4 h-4" />
+                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed rounded-xl text-sm font-semibold transition-all shadow-lg shadow-emerald-500/20">
+                  {T('next')} <ArrowRight className="w-4 h-4" />
                 </motion.button>
               </div>
             </motion.div>
@@ -1562,8 +2117,8 @@ Return a JSON object:
           {wizardStep === 'style' && (
             <motion.div key="style" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-3xl mx-auto space-y-8">
               <div className="text-center space-y-2">
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Choose your style</h1>
-                <p className="text-sm text-[--text-muted]">Pick a visual style and upload character references</p>
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{T('chooseStyle')}</h1>
+                <p className="text-sm text-[--text-muted]">{T('pickVisual')}</p>
               </div>
 
               {/* Style Grid */}
@@ -1596,7 +2151,7 @@ Return a JSON object:
               {/* Reference Images */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-[--text-secondary]">Character & Atmosphere References</h3>
+                  <h3 className="text-sm font-semibold text-[--text-secondary]">{T('characterRefs')}</h3>
                   <span className="text-xs font-medium text-[--text-muted]">{referenceImages.length}/3</span>
                 </div>
                 <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
@@ -1611,9 +2166,18 @@ Return a JSON object:
                   ))}
                   {referenceImages.length < 3 && (
                     <button onClick={() => fileInputRef.current?.click()}
-                      className="aspect-square bg-[--bg-card] border-2 border-dashed border-[--border-subtle] rounded-xl flex flex-col items-center justify-center gap-2 hover:bg-[--bg-card-hover] hover:border-[--text-muted] transition-all">
+                      onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-emerald-500', 'bg-emerald-500/10'); }}
+                      onDragLeave={(e) => { e.currentTarget.classList.remove('border-emerald-500', 'bg-emerald-500/10'); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.currentTarget.classList.remove('border-emerald-500', 'bg-emerald-500/10');
+                        const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+                        if (files.length > 0) addImageFiles(files);
+                      }}
+                      className="aspect-square bg-[--bg-card] border-2 border-dashed border-[--border-subtle] rounded-xl flex flex-col items-center justify-center gap-1 hover:bg-[--bg-card-hover] hover:border-[--text-muted] transition-all">
                       <Upload className="w-5 h-5 text-[--text-muted]" />
-                      <span className="text-[11px] font-medium text-[--text-muted]">Upload</span>
+                      <span className="text-[11px] font-medium text-[--text-muted]">{T('upload')}</span>
+                      <span className="text-[9px] text-[--text-muted] opacity-60">or Ctrl+V</span>
                     </button>
                   )}
                 </div>
@@ -1624,12 +2188,12 @@ Return a JSON object:
               <div className="flex justify-between">
                 <button onClick={() => setWizardStep('story')}
                   className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
-                  <ArrowLeft className="w-4 h-4" /> Back
+                  <ArrowLeft className="w-4 h-4" /> {T('back')}
                 </button>
                 <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                   onClick={() => setWizardStep('language')}
-                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-blue-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20">
-                  Next <ArrowRight className="w-4 h-4" />
+                  className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-emerald-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-emerald-500/20">
+                  {T('next')} <ArrowRight className="w-4 h-4" />
                 </motion.button>
               </div>
             </motion.div>
@@ -1639,8 +2203,8 @@ Return a JSON object:
           {wizardStep === 'language' && (
             <motion.div key="language" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-xl mx-auto space-y-8">
               <div className="text-center space-y-2">
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Select languages</h1>
-                <p className="text-sm text-[--text-muted]">Choose one or more languages for dubbing</p>
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{T('selectLanguages')}</h1>
+                <p className="text-sm text-[--text-muted]">{T('chooseLanguages')}</p>
               </div>
 
               {/* Language Cards - Multi-Select */}
@@ -1670,15 +2234,15 @@ Return a JSON object:
               <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                 onClick={() => { generateScript(); setWizardStep('timeline'); }}
                 disabled={isGeneratingScript || !prompt.trim() || selectedLanguages.length === 0}
-                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-[--accent] to-indigo-500 hover:from-blue-500 hover:to-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed rounded-2xl text-base font-bold transition-all shadow-xl shadow-blue-500/20">
-                {isGeneratingScript ? <><Loader2 className="w-5 h-5 animate-spin" /> Creating your movie script...</> : <><Sparkles className="w-5 h-5" /> Generate Script</>}
+                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-[--accent] to-teal-500 hover:from-emerald-500 hover:to-teal-400 disabled:opacity-40 disabled:cursor-not-allowed rounded-2xl text-base font-bold transition-all shadow-xl shadow-emerald-500/20">
+                {isGeneratingScript ? <><Loader2 className="w-5 h-5 animate-spin" /> {T('creatingScript')}</> : <><Sparkles className="w-5 h-5" /> {T('generateScript')}</>}
               </motion.button>
 
               {/* Navigation */}
               <div className="flex justify-start">
                 <button onClick={() => setWizardStep('style')}
                   className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
-                  <ArrowLeft className="w-4 h-4" /> Back
+                  <ArrowLeft className="w-4 h-4" /> {T('back')}
                 </button>
               </div>
             </motion.div>
@@ -1699,8 +2263,8 @@ Return a JSON object:
                     <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                       onClick={produceNextScene}
                       disabled={isGeneratingAll || isProcessingVideo || !isApiKeySelected}
-                      className="flex items-center gap-2 px-5 py-2.5 bg-[--success] hover:bg-emerald-400 text-black disabled:opacity-40 rounded-xl text-xs font-bold uppercase tracking-wide transition-all shadow-lg shadow-emerald-500/20">
-                      {isGeneratingAll ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : <><Play className="w-4 h-4 fill-current" /> Produce Next</>}
+                      className="flex items-center gap-2 px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-white disabled:opacity-40 rounded-xl text-xs font-bold uppercase tracking-wide transition-all shadow-lg shadow-emerald-500/20">
+                      {isGeneratingAll ? <><Loader2 className="w-4 h-4 animate-spin" /> {T('processing')}</> : <><Play className="w-4 h-4 fill-current" /> {T('produceNext')}</>}
                     </motion.button>
                   )}
                   <button onClick={addManualScene} className="p-2.5 bg-[--bg-card] hover:bg-[--bg-card-hover] border border-[--border-subtle] rounded-xl transition-all">
@@ -1713,7 +2277,7 @@ Return a JSON object:
               {isGeneratingAll && script && (
                 <div className="bg-[--bg-card] rounded-xl p-4 border border-[--border-subtle]">
                   <div className="flex items-center justify-between text-xs font-medium mb-2">
-                    <span className="text-[--text-secondary]">Producing scenes...</span>
+                    <span className="text-[--text-secondary]">{T('producingScenes')}</span>
                     <span className="text-[--accent]">{script.scenes.filter(s => s.status === 'completed').length}/{script.scenes.length}</span>
                   </div>
                   <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
@@ -1741,7 +2305,7 @@ Return a JSON object:
                         /* Edit Mode */
                         <div className="space-y-3">
                           <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-[--accent] uppercase tracking-wide">Edit Scene {index + 1}</span>
+                            <span className="text-xs font-bold text-[--accent] uppercase tracking-wide">{T('editScene')} {index + 1}</span>
                             <button onClick={() => setEditingSceneId(null)} className="p-1.5 hover:bg-white/10 rounded-lg"><X className="w-4 h-4" /></button>
                           </div>
                           <input value={scene.title} onChange={(e) => updateScene(scene.id, { title: e.target.value })}
@@ -1753,7 +2317,7 @@ Return a JSON object:
                           <textarea value={scene.audioScript} onChange={(e) => updateScene(scene.id, { audioScript: e.target.value })}
                             className="w-full bg-[--bg-primary] border border-[--border-subtle] rounded-xl p-3 text-sm h-20 resize-none focus:outline-none focus:border-[--accent]/50" placeholder="Audio script (dialogue/narration)" />
                           <button onClick={() => setEditingSceneId(null)}
-                            className="w-full py-2.5 bg-[--accent] hover:bg-blue-500 rounded-xl text-xs font-bold uppercase tracking-wide transition-all">Done</button>
+                            className="w-full py-2.5 bg-[--accent] hover:bg-emerald-500 rounded-xl text-xs font-bold uppercase tracking-wide transition-all">{T('done')}</button>
                         </div>
                       ) : (
                         /* View Mode */
@@ -1772,13 +2336,13 @@ Return a JSON object:
                                 <h3 className="font-semibold text-sm truncate">{scene.title}</h3>
                                 {/* Status Pill */}
                                 {scene.status === 'completed' && scene.approved && (
-                                  <span className="px-2 py-0.5 bg-[--success-soft] text-[--success] text-[10px] font-bold rounded-full uppercase">Approved</span>
+                                  <span className="px-2 py-0.5 bg-[--success-soft] text-[--success] text-[10px] font-bold rounded-full uppercase">{T('approved')}</span>
                                 )}
                                 {scene.status === 'completed' && !scene.approved && (
-                                  <span className="px-2 py-0.5 bg-[--success-soft] text-[--success] text-[10px] font-bold rounded-full uppercase">Done</span>
+                                  <span className="px-2 py-0.5 bg-[--success-soft] text-[--success] text-[10px] font-bold rounded-full uppercase">{T('done')}</span>
                                 )}
                                 {scene.status === 'generating' && (
-                                  <span className="px-2 py-0.5 bg-[--accent-soft] text-[--accent] text-[10px] font-bold rounded-full uppercase animate-pulse">Producing...</span>
+                                  <span className="px-2 py-0.5 bg-[--accent-soft] text-[--accent] text-[10px] font-bold rounded-full uppercase animate-pulse">{T('producingStatus')}</span>
                                 )}
                               </div>
                               <p className="text-xs text-[--text-muted] truncate mt-0.5">{scene.description}</p>
@@ -1795,16 +2359,16 @@ Return a JSON object:
                                 <>
                                   {!scene.approved && (
                                     <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-                                      onClick={() => approveScene(scene.id)} title="Approve scene to enable next scene production"
-                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[--success] hover:bg-emerald-400 text-black rounded-lg text-xs font-bold transition-all animate-pulse">
-                                      <Check className="w-3.5 h-3.5" /> Approve
+                                      onClick={() => showApprovePreview(scene)} title={T('approveTip')}
+                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-emerald-500/30">
+                                      <Check className="w-3.5 h-3.5" /> {T('approve')}
                                     </motion.button>
                                   )}
-                                  <button onClick={() => { setCurrentSceneIndex(index); setWizardStep('preview'); }} title="Preview"
+                                  <button onClick={() => { setCurrentSceneIndex(index); setWizardStep('preview'); }} title={T('navPreview')}
                                     className="p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-all">
                                     <Play className="w-4 h-4 fill-current" />
                                   </button>
-                                  <button onClick={() => downloadSceneVideo(scene)} title="Download"
+                                  <button onClick={() => downloadSceneVideo(scene)} title={T('download')}
                                     className="p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-all">
                                     <Download className="w-4 h-4" />
                                   </button>
@@ -1813,16 +2377,16 @@ Return a JSON object:
                               {scene.status === 'pending' && (
                                 <button onClick={() => generateVideoForScene(index)}
                                   disabled={isProcessingVideo || !isApiKeySelected || !canProduceScene(index)}
-                                  title={!canProduceScene(index) ? `Approve Scene ${index} first` : 'Produce this scene'}
+                                  title={!canProduceScene(index) ? `Approve Scene ${index} first` : T('produce')}
                                   className="px-3 py-1.5 bg-white text-black hover:bg-white/90 disabled:opacity-20 disabled:cursor-not-allowed rounded-lg text-xs font-bold transition-all">
-                                  Produce
+                                  {T('produce')}
                                 </button>
                               )}
                               {scene.status === 'generating' && <Loader2 className="w-5 h-5 text-[--accent] animate-spin" />}
                               {scene.status === 'failed' && (
                                 <button onClick={() => generateVideoForScene(index)}
                                   disabled={isProcessingVideo || !canProduceScene(index)}
-                                  className="px-3 py-1.5 bg-[--danger-soft] text-[--danger] disabled:opacity-20 rounded-lg text-xs font-bold">Retry</button>
+                                  className="px-3 py-1.5 bg-[--danger-soft] text-[--danger] disabled:opacity-20 rounded-lg text-xs font-bold">{T('retry')}</button>
                               )}
                               <button onClick={() => setEditingSceneId(scene.id)} className="p-2 hover:bg-white/5 rounded-lg text-[--text-muted]">
                                 <Settings className="w-3.5 h-3.5" />
@@ -1855,7 +2419,7 @@ Return a JSON object:
                           {scene.status === 'completed' && !scene.approved && (
                             <div className="mt-3 pt-3 border-t border-[--border-subtle] flex items-center gap-2 text-xs text-[--warning]">
                               <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                              <span>Approve this scene to unlock the next one for production</span>
+                              <span>{T('approveUnlock')}</span>
                             </div>
                           )}
                         </>
@@ -1868,15 +2432,15 @@ Return a JSON object:
                 {(!script || script.scenes.length === 0) && !isGeneratingScript && (
                   <div className="h-48 flex flex-col items-center justify-center border border-dashed border-[--border-subtle] rounded-2xl text-[--text-muted]">
                     <Clapperboard className="w-10 h-10 mb-3 opacity-30" />
-                    <p className="text-sm font-medium">No scenes yet</p>
-                    <p className="text-xs mt-1">Go back to generate a script first</p>
+                    <p className="text-sm font-medium">{T('noScenesYet')}</p>
+                    <p className="text-xs mt-1">{T('generateFirst')}</p>
                   </div>
                 )}
 
                 {isGeneratingScript && (
                   <div className="h-48 flex flex-col items-center justify-center">
                     <Loader2 className="w-8 h-8 text-[--accent] animate-spin mb-4" />
-                    <p className="text-sm font-medium text-[--text-secondary]">Creating your movie script...</p>
+                    <p className="text-sm font-medium text-[--text-secondary]">{T('creatingScript')}</p>
                   </div>
                 )}
               </div>
@@ -1885,13 +2449,13 @@ Return a JSON object:
               <div className="flex justify-between">
                 <button onClick={() => setWizardStep('language')}
                   className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
-                  <ArrowLeft className="w-4 h-4" /> Back
+                  <ArrowLeft className="w-4 h-4" /> {T('back')}
                 </button>
                 {script && script.scenes.some(s => s.status === 'completed') && (
                   <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                     onClick={() => { setCurrentSceneIndex(0); setWizardStep('preview'); }}
-                    className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-blue-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20">
-                    Preview <ArrowRight className="w-4 h-4" />
+                    className="flex items-center gap-2 px-6 py-3 bg-[--accent] hover:bg-emerald-500 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-emerald-500/20">
+                    {T('navPreview')} <ArrowRight className="w-4 h-4" />
                   </motion.button>
                 )}
               </div>
@@ -1902,25 +2466,44 @@ Return a JSON object:
           {wizardStep === 'preview' && (
             <motion.div key="preview" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-4xl mx-auto space-y-6">
 
-              {/* Video Player */}
-              <div className="aspect-video bg-black rounded-2xl sm:rounded-3xl overflow-hidden border border-[--border-subtle] relative shadow-2xl">
+              {/* Video Player — unified playback with hidden audio element */}
+              <div className="aspect-video bg-black rounded-2xl sm:rounded-3xl overflow-hidden border border-[--border-subtle] relative shadow-2xl group">
                 {currentSceneIndex !== null && script?.scenes[currentSceneIndex]?.videoUrl ? (
                   (() => {
                     const previewScene = script.scenes[currentSceneIndex];
                     const previewAudioUrl = previewScene.langMedia?.[audioLanguage]?.audioUrl || previewScene.audioUrl;
+                    const hasPrev = currentSceneIndex > 0 && script.scenes[currentSceneIndex - 1]?.videoUrl;
+                    const hasNext = currentSceneIndex < script.scenes.length - 1 && script.scenes[currentSceneIndex + 1]?.videoUrl;
                     return <>
-                      <video ref={videoRef} src={previewScene.videoUrl} controls autoPlay
+                      <video ref={videoRef} key={previewScene.id + '_video'} src={previewScene.videoUrl} controls autoPlay
                         muted={!!previewAudioUrl} className="w-full h-full object-cover" />
+                      {/* Hidden audio element — synced with video via useEffect */}
                       {previewAudioUrl && (
-                        <audio ref={audioRef} src={previewAudioUrl} autoPlay controls
-                          className="absolute bottom-3 left-3 right-3 z-20 opacity-90 h-8" />
+                        <audio ref={audioRef} key={previewScene.id + '_audio_' + audioLanguage} src={previewAudioUrl} autoPlay className="hidden" />
+                      )}
+                      {/* Scene indicator overlay */}
+                      <div className="absolute top-3 left-3 z-20 bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-lg pointer-events-none">
+                        <span className="text-xs font-bold text-white">{T('scene')} {currentSceneIndex + 1}/{script.scenes.length}</span>
+                      </div>
+                      {/* Prev/Next scene buttons — visible on hover */}
+                      {hasPrev && (
+                        <button onClick={() => setCurrentSceneIndex(currentSceneIndex - 1)}
+                          className="absolute left-2 top-1/2 -translate-y-1/2 z-20 w-10 h-10 bg-black/50 hover:bg-black/70 backdrop-blur-sm rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                          <ArrowLeft className="w-5 h-5 text-white" />
+                        </button>
+                      )}
+                      {hasNext && (
+                        <button onClick={() => setCurrentSceneIndex(currentSceneIndex + 1)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 z-20 w-10 h-10 bg-black/50 hover:bg-black/70 backdrop-blur-sm rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                          <ArrowRight className="w-5 h-5 text-white" />
+                        </button>
                       )}
                     </>;
                   })()
                 ) : (
                   <div className="absolute inset-0 flex flex-col items-center justify-center text-[--text-muted]">
                     <Clapperboard className="w-12 h-12 mb-4 opacity-20" />
-                    <p className="text-sm font-medium">Select a scene to preview</p>
+                    <p className="text-sm font-medium">{T('selectScenePreview')}</p>
                   </div>
                 )}
 
@@ -1930,15 +2513,15 @@ Return a JSON object:
                     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                       className="absolute inset-0 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center z-30">
                       <Loader2 className="w-12 h-12 text-[--accent] animate-spin mb-4" />
-                      <p className="text-lg font-bold">Rendering...</p>
+                      <p className="text-lg font-bold">{T('rendering')}</p>
                       <p className="text-xs text-[--text-muted] mt-1">Scene {currentSceneIndex !== null ? currentSceneIndex + 1 : ''}</p>
                     </motion.div>
                   )}
                 </AnimatePresence>
               </div>
 
-              {/* Language Switcher for Preview */}
-              {selectedLanguages.length > 1 && (
+              {/* Language Switcher for Preview — always show so user sees active language */}
+              {selectedLanguages.length >= 1 && (
                 <div className="flex items-center gap-2 justify-center">
                   <Volume2 className="w-4 h-4 text-[--text-muted]" />
                   <span className="text-xs text-[--text-muted] font-medium">Audio:</span>
@@ -1947,7 +2530,7 @@ Return a JSON object:
                       className={cn(
                         "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all",
                         audioLanguage === lang
-                          ? "bg-blue-600/20 border-blue-500/50 text-blue-300"
+                          ? "bg-emerald-600/20 border-emerald-500/50 text-emerald-300"
                           : "bg-[--bg-card] border-[--border-subtle] text-[--text-muted] hover:bg-[--bg-card-hover]"
                       )}>
                       <span>{LANGUAGE_CONFIG[lang].flag}</span>
@@ -1962,20 +2545,20 @@ Return a JSON object:
                 <div className="p-5 bg-[--bg-card] border border-[--border-subtle] rounded-2xl">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-[--accent] bg-[--accent-soft] px-2 py-1 rounded-md">Scene {currentSceneIndex + 1}</span>
+                      <span className="text-xs font-bold text-[--accent] bg-[--accent-soft] px-2 py-1 rounded-md">{T('scene')} {currentSceneIndex + 1}</span>
                       <h3 className="font-bold">{script.scenes[currentSceneIndex].title}</h3>
                     </div>
                     <div className="flex items-center gap-2">
                       {script.scenes[currentSceneIndex].status === 'completed' && !script.scenes[currentSceneIndex].approved && (
-                        <button onClick={() => approveScene(script.scenes[currentSceneIndex].id)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-[--success] text-black rounded-lg text-xs font-bold">
-                          <Check className="w-3.5 h-3.5" /> Approve
+                        <button onClick={() => showApprovePreview(script.scenes[currentSceneIndex])}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/30">
+                          <Check className="w-3.5 h-3.5" /> {T('approve')}
                         </button>
                       )}
                       {script.scenes[currentSceneIndex].videoUrl && (
                         <button onClick={() => downloadSceneVideo(script.scenes[currentSceneIndex])}
                           className="flex items-center gap-1.5 px-3 py-1.5 bg-[--bg-card-hover] border border-[--border-subtle] rounded-lg text-xs font-medium">
-                          <Download className="w-3.5 h-3.5" /> Download
+                          <Download className="w-3.5 h-3.5" /> {T('download')}
                         </button>
                       )}
                     </div>
@@ -2010,12 +2593,12 @@ Return a JSON object:
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Film className="w-5 h-5 text-[--accent]" />
-                      <h3 className="font-bold text-sm">Export Full Movie</h3>
+                      <h3 className="font-bold text-sm">{T('exportMovie')}</h3>
                     </div>
                     {!showExportDialog && (
                       <button onClick={() => { setShowExportDialog(true); setExportStatus('idle'); setExportLanguage(selectedLanguages[0] || 'he'); }}
-                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-[--accent] to-purple-500 text-white rounded-xl text-sm font-bold shadow-lg hover:shadow-xl transition-all hover:scale-[1.02]">
-                        <Download className="w-4 h-4" /> Export Movie 🎬
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-[--accent] to-teal-500 text-white rounded-xl text-sm font-bold shadow-lg hover:shadow-xl transition-all hover:scale-[1.02]">
+                        <Download className="w-4 h-4" /> {T('exportMovieBtn')}
                       </button>
                     )}
                   </div>
@@ -2028,7 +2611,7 @@ Return a JSON object:
                         {/* Language Selector */}
                         {exportStatus === 'idle' && (
                           <div className="space-y-2">
-                            <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Audio Language</label>
+                            <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">{T('audioLanguageLabel')}</label>
                             <div className="flex gap-2">
                               {selectedLanguages.map(lang => (
                                 <button key={lang} onClick={() => setExportLanguage(lang)}
@@ -2046,6 +2629,39 @@ Return a JSON object:
                             <p className="text-xs text-[--text-muted]">
                               {script.scenes.filter(s => s.status === 'completed').length} scenes will be merged into one MP4 file
                             </p>
+
+                            {/* Background Music Upload */}
+                            <div className="mt-3 pt-3 border-t border-[--border-subtle] space-y-2">
+                              <label className="text-xs font-semibold text-[--text-muted] uppercase tracking-wider">Background Music (optional)</label>
+                              <input ref={bgMusicInputRef} type="file" accept="audio/*" className="hidden"
+                                onChange={(e) => { const f = e.target.files?.[0]; if (f) setBgMusicFile(f); }} />
+                              {bgMusicFile ? (
+                                <div className="flex items-center gap-2">
+                                  <div className="flex-1 flex items-center gap-2 px-3 py-2 bg-[--bg-card-hover] border border-[--border-subtle] rounded-lg">
+                                    <Volume2 className="w-4 h-4 text-[--accent] shrink-0" />
+                                    <span className="text-xs text-[--text-secondary] truncate">{bgMusicFile.name}</span>
+                                  </div>
+                                  <button onClick={() => { setBgMusicFile(null); if (bgMusicInputRef.current) bgMusicInputRef.current.value = ''; }}
+                                    className="p-2 text-red-400 hover:bg-red-500/10 rounded-lg transition-colors">
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <button onClick={() => bgMusicInputRef.current?.click()}
+                                  className="flex items-center gap-2 px-4 py-2 bg-[--bg-card-hover] border border-dashed border-[--border-subtle] rounded-xl text-xs font-medium text-[--text-muted] hover:bg-[--bg-card-active] hover:border-[--accent]/30 transition-all w-full justify-center">
+                                  <Upload className="w-3.5 h-3.5" /> Upload MP3/WAV music track
+                                </button>
+                              )}
+                              {bgMusicFile && (
+                                <div className="flex items-center gap-3">
+                                  <span className="text-[10px] text-[--text-muted] shrink-0">Volume:</span>
+                                  <input type="range" min="0.05" max="0.5" step="0.05" value={bgMusicVolume}
+                                    onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
+                                    className="flex-1 h-1 accent-emerald-500" />
+                                  <span className="text-[10px] text-[--text-muted] w-8 text-right">{Math.round(bgMusicVolume * 100)}%</span>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         )}
 
@@ -2057,7 +2673,7 @@ Return a JSON object:
                               <div className="flex-1">
                                 <p className="text-sm font-medium">{exportProgressMsg}</p>
                                 <div className="mt-2 w-full bg-white/10 rounded-full h-2 overflow-hidden">
-                                  <motion.div className="h-full bg-gradient-to-r from-[--accent] to-purple-500 rounded-full"
+                                  <motion.div className="h-full bg-gradient-to-r from-[--accent] to-teal-500 rounded-full"
                                     initial={{ width: 0 }} animate={{ width: `${exportProgress}%` }} transition={{ duration: 0.3 }} />
                                 </div>
                                 <p className="text-xs text-[--text-muted] mt-1">{exportProgress}%</p>
@@ -2071,11 +2687,11 @@ Return a JSON object:
                           <div className="space-y-3">
                             <div className="flex items-center gap-2 text-[--success]">
                               <CheckCircle2 className="w-5 h-5" />
-                              <p className="text-sm font-bold">Movie exported successfully!</p>
+                              <p className="text-sm font-bold">{T('exportSuccess')}</p>
                             </div>
                             <button onClick={downloadExportedMovie}
-                              className="flex items-center gap-2 px-5 py-3 bg-[--success] text-black rounded-xl text-sm font-bold w-full justify-center hover:brightness-110 transition-all">
-                              <Download className="w-4 h-4" /> Download MP4
+                              className="flex items-center gap-2 px-5 py-3 bg-emerald-500 text-white rounded-xl text-sm font-bold w-full justify-center hover:bg-emerald-400 transition-all">
+                              <Download className="w-4 h-4" /> {T('downloadMp4')}
                             </button>
                           </div>
                         )}
@@ -2095,13 +2711,13 @@ Return a JSON object:
                           {exportStatus === 'idle' && (
                             <button onClick={exportMovie}
                               className="flex items-center gap-2 px-5 py-2.5 bg-[--accent] text-white rounded-xl text-sm font-bold hover:brightness-110 transition-all">
-                              <Play className="w-4 h-4" /> Start Export
+                              <Play className="w-4 h-4" /> {T('startExport')}
                             </button>
                           )}
                           {(exportStatus === 'error' || exportStatus === 'done') && (
                             <button onClick={() => { setExportStatus('idle'); setExportProgress(0); setExportProgressMsg(''); }}
                               className="flex items-center gap-2 px-4 py-2 bg-[--bg-card-hover] border border-[--border-subtle] rounded-xl text-sm font-medium hover:bg-[--bg-card-active] transition-all">
-                              Export Again
+                              {T('exportAgain')}
                             </button>
                           )}
                           <button onClick={() => { setShowExportDialog(false); setExportStatus('idle'); }}
@@ -2119,7 +2735,7 @@ Return a JSON object:
               <div className="flex justify-start">
                 <button onClick={() => setWizardStep('timeline')}
                   className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
-                  <ArrowLeft className="w-4 h-4" /> Timeline
+                  <ArrowLeft className="w-4 h-4" /> {T('back')}
                 </button>
               </div>
             </motion.div>
@@ -2129,8 +2745,8 @@ Return a JSON object:
           {wizardStep === 'pricing' && (
             <motion.div key="pricing" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-4xl mx-auto space-y-6">
               <div className="text-center space-y-2">
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Choose your plan</h1>
-                <p className="text-sm text-[--text-muted]">Scale your movie production with the right tier</p>
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{T('choosePlan')}</h1>
+                <p className="text-sm text-[--text-muted]">{T('scaleProduction')}</p>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
@@ -2139,28 +2755,28 @@ Return a JSON object:
                     className={cn(
                       "relative p-5 rounded-2xl border transition-all text-center space-y-3",
                       userProfile.plan === tier
-                        ? "bg-blue-600/20 border-blue-500/50 text-blue-300 shadow-lg shadow-blue-500/20"
+                        ? "bg-emerald-600/20 border-emerald-500/50 text-emerald-300 shadow-lg shadow-emerald-500/20"
                         : "bg-[--bg-card] border-[--border-subtle] hover:bg-[--bg-card-hover]"
                     )}>
                     {tier === 'pro' && (
-                      <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3 py-0.5 bg-[--accent] text-white text-[10px] font-bold uppercase rounded-full">Popular</span>
+                      <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3 py-0.5 bg-[--accent] text-white text-[10px] font-bold uppercase rounded-full">{T('popular')}</span>
                     )}
                     {userProfile.plan === tier && (
-                      <span className="absolute top-2 right-2"><CheckCircle2 className="w-4 h-4 text-blue-400" /></span>
+                      <span className="absolute top-2 right-2"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></span>
                     )}
                     <Crown className={cn("w-6 h-6 mx-auto", tier === 'free' ? 'text-[--text-muted]' : 'text-[--accent]')} />
                     <h3 className="font-bold text-lg">{config.label}</h3>
-                    <p className="text-2xl font-black">{config.price === 0 ? 'Free' : `$${config.price}`}<span className="text-xs font-normal text-[--text-muted]">{config.price > 0 ? '/mo' : ''}</span></p>
+                    <p className="text-2xl font-black">{config.price === 0 ? 'Free' : `$${config.price}`}<span className="text-xs font-normal text-[--text-muted]">{config.price > 0 ? T('perMonth') : ''}</span></p>
                     <p className="text-xs text-[--text-muted]">{config.desc}</p>
                     <button
                       onClick={() => persistUserProfile({ ...userProfile, plan: tier, credits: config.films })}
                       className={cn(
                         "w-full py-2.5 rounded-xl text-xs font-bold transition-all",
                         userProfile.plan === tier
-                          ? "bg-blue-600/30 text-blue-300 cursor-default"
-                          : "bg-[--accent] hover:bg-blue-500 text-white"
+                          ? "bg-emerald-600/30 text-emerald-300 cursor-default"
+                          : "bg-[--accent] hover:bg-emerald-500 text-white"
                       )}>
-                      {userProfile.plan === tier ? 'Current Plan' : 'Select Plan'}
+                      {userProfile.plan === tier ? T('currentPlan') : T('selectPlan')}
                     </button>
                   </div>
                 ))}
@@ -2169,7 +2785,7 @@ Return a JSON object:
               <div className="flex justify-start">
                 <button onClick={() => setWizardStep('story')}
                   className="flex items-center gap-2 px-5 py-2.5 bg-[--bg-card] border border-[--border-subtle] rounded-xl text-sm font-medium text-[--text-secondary] hover:bg-[--bg-card-hover] transition-all">
-                  <ArrowLeft className="w-4 h-4" /> Back to Studio
+                  <ArrowLeft className="w-4 h-4" /> {T('backToStudio')}
                 </button>
               </div>
             </motion.div>

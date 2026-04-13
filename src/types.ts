@@ -18,6 +18,7 @@ export interface Scene {
   durationSeconds: number;
   status: 'pending' | 'generating' | 'completed' | 'failed';
   approved: boolean; // User approved this scene's last frame for continuity
+  continueFromPrev: boolean; // If true, next scene starts from this scene's last frame
   videoUrl?: string;
   videoObject?: any; // The Veo video object for extension
   audioUrl?: string;
@@ -40,6 +41,8 @@ export type AudioLanguage = 'he' | 'en' | 'zh';
 
 export type WizardStep = 'projects' | 'story' | 'style' | 'language' | 'timeline' | 'preview' | 'pricing';
 
+export type UILanguage = 'en' | 'he' | 'ar' | 'fr' | 'zh' | 'pt' | 'es' | 'de' | 'it' | 'ru' | 'ko' | 'ja';
+
 export type PlanTier = 'free' | 'basic' | 'pro' | 'studio' | 'unlimited';
 
 export type UserProfile = {
@@ -48,6 +51,26 @@ export type UserProfile = {
   plan: PlanTier;
   credits: number; // films remaining this month
   scenesUsed: number; // scenes produced (free tier limit)
+  avatarUrl?: string;
+  createdAt?: string;
+};
+
+export type DbProfile = {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  plan: PlanTier;
+  credits: number;
+  scenes_used: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SavedApiKey = {
+  id: string;
+  provider: string;
+  key_hash: string; // last 6 chars for display
+  created_at: string;
 };
 
 export type Project = {
